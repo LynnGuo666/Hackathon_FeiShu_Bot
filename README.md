@@ -58,7 +58,7 @@ cp .env.example .env          # 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
 ## 飞书开发者后台配置清单
 
 1. 创建企业自建应用，启用「机器人」能力。
-2. 开通权限：`im:message:send_as_bot`、`im:message:readonly`、`im:chat:create`、`im:chat:read`、`im:chat.members:write_only`、`im:chat.members:read`、`bitable:app`、`contact:user.base:readonly`、**获取用户手机号**（`contact:user.employee_id:readonly` 所属的手机号读取权限）、`application:application:self_manage`（管理员识别，或 `admin:app.info:readonly`）。
+2. 开通权限：`im:message:send_as_bot`、`im:message:readonly`、`im:chat:create`、`im:chat:read`、`im:chat:update`、`im:chat:moderation:write_only`、`im:chat.members:write_only`、`im:chat.members:read`、`bitable:app`、`contact:user.base:readonly`、**获取用户手机号**（`contact:user.employee_id:readonly` 所属的手机号读取权限）、`application:application:self_manage`（管理员识别，或 `admin:app.info:readonly`）。
 3. 事件与回调：订阅方式选择「**使用长连接接收事件**」，订阅 `im.message.receive_v1`；如需卡片交互，开启回调配置。
 4. 把「活动报名」Base 和「选手数据库」Base 添加应用为**协作者**（可编辑）。
 5. 应用可用范围加入需要验证的选手。
@@ -108,6 +108,8 @@ cp .env.example .env          # 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
 外部群必须由用户担任群主，但建群接口会同时把创建群的机器人设为群管理员，后续机器人才能自动拉人。旧群若仍报 `232017`，请由群主在「群设置 → 群管理」中将机器人设为管理员；若客户端无法设置机器人管理员，则把「谁可以添加群成员、分享群」改为「所有群成员」。
 
 如果旧群是机器人创建的，也可以在开发者后台额外开通 `im:chat:operate_as_owner` 并发布应用，让机器人按创建者权限操作；该方式不适用于由其他用户创建的群。
+
+**群限制**：机器人建群后会自动套用旧选手群的限制模板：仅群主/管理员可拉人、分享群、@所有人、编辑群信息、加急和发起视频会议；需要审批入群；所有成员可发言；入群提示对所有成员可见，退群提示仅群主/管理员可见，成员人数对所有成员可见。飞书当前没有可靠的官方服务端接口修改「置顶管理权限」，该项需在客户端手动设置。更新已有群时可使用 `bot.core.lark_client` 中的通知群、选手群和组委会群模板。
 
 **新增群怎么办**：不需要任何手动操作。机器人默认每 30 分钟（`BACKFILL_INTERVAL_MINUTES`，设 0 禁用）自动补拉一次——按群成员实时数据找出还没进新群的已验证用户并拉入；也可以随时让管理员发「补拉」立即执行。是否已在群里完全以飞书群成员列表为准，不依赖任何本地状态字段。
 
