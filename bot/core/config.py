@@ -24,6 +24,7 @@ class Config:
 
     db_base_token: str = field(default_factory=lambda: _env("DB_BASE_TOKEN"))
     tbl_contestants: str = field(default_factory=lambda: _env("TBL_CONTESTANTS", "选手表"))
+    tbl_organizers: str = field(default_factory=lambda: _env("TBL_ORGANIZERS", "组委会表"))
     tbl_teams: str = field(default_factory=lambda: _env("TBL_TEAMS", "队伍表"))
     tbl_group_config: str = field(default_factory=lambda: _env("TBL_GROUP_CONFIG", "群配置表"))
     tbl_pull_log: str = field(default_factory=lambda: _env("TBL_PULL_LOG", "拉群记录表"))

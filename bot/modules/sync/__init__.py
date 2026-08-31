@@ -105,6 +105,63 @@ REGISTRY.command("管理员")(handle_admins)
 @REGISTRY.job("报名表自动同步", CFG.sync_interval_minutes)
 async def sync_job() -> None:
     run_sync()
+    sync_group_audience_options()
+
+
+def sync_group_audience_options() -> None:
+    """群配置表「面向身份」多选选项随组委会表「身份」选项自动同步：
+    组委会表出现新身份时，给群配置表补上「组委会-{身份}」选项（幂等）。"""
+    try:
+        from ...core.base_store import _sdk_client
+        from lark_oapi.api.bitable.v1 import (AppTableField, AppTableFieldProperty,
+                                              ListAppTableFieldRequest,
+                                              UpdateAppTableFieldRequest)
+
+        client = _sdk_client()
+        # 组委会表「身份」列选项（option 对象有 .name 属性）
+        fr = client.bitable.v1.app_table_field.list(
+            ListAppTableFieldRequest.builder().app_token(CFG.db_base_token)
+            .table_id(_resolve_table_id(CFG.tbl_organizers)).build())
+        org_options = []
+        for f in (fr.data.items or []):
+            if f.field_name == "身份" and f.property:
+                org_options = [o.name for o in (f.property.options or []) if getattr(o, "name", None)]
+        # 群配置表「面向身份」列
+        fr2 = client.bitable.v1.app_table_field.list(
+            ListAppTableFieldRequest.builder().app_token(CFG.db_base_token)
+            .table_id(_resolve_table_id(CFG.tbl_group_config)).build())
+        cur_options = []
+        audience_fid = None
+        for f in (fr2.data.items or []):
+            if f.field_name == "面向身份":
+                audience_fid = f.field_id
+                if f.property:
+                    cur_options = [o.name for o in (f.property.options or []) if getattr(o, "name", None)]
+        if not audience_fid:
+            log.warning("群配置表无「面向身份」列，跳过选项同步")
+            return
+        want = ["选手"] + [f"组委会-{o}" for o in org_options] + ["全部"]
+        missing = [o for o in want if o not in cur_options]
+        if not missing:
+            return
+        new_options = [{"name": o} for o in cur_options + missing]
+        body = (AppTableField.builder().field_name("面向身份").type(4)
+                .property(AppTableFieldProperty.builder().options(new_options).build()).build())
+        ur = client.bitable.v1.app_table_field.update(
+            UpdateAppTableFieldRequest.builder().app_token(CFG.db_base_token)
+            .table_id(_resolve_table_id(CFG.tbl_group_config)).field_id(audience_fid)
+            .request_body(body).build())
+        if ur.success():
+            log.info("群配置表「面向身份」选项已同步，新增: %s", missing)
+        else:
+            log.warning("同步「面向身份」选项失败: %s %s", ur.code, ur.msg)
+    except Exception:
+        log.exception("同步群配置表选项出错（不影响主流程）")
+
+
+def _resolve_table_id(table: str) -> str:
+    from ...core.base_store import BaseStore
+    return BaseStore(CFG.db_base_token).resolve_table_id(table)
 
 
 @REGISTRY.job("管理员名单刷新", 10)

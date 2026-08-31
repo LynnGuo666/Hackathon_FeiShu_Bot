@@ -56,7 +56,7 @@ def _find_contestant(store: BaseStore, open_id: str) -> dict | None:
 
 
 def project_list_card() -> dict:
-    """项目列表卡片（JSON 2.0）：每个项目一个投票按钮（behaviors callback）。"""
+    """项目列表卡片（JSON 2.0）：每个项目一个投票按钮（behaviors callback）。票数不公开。"""
     store = BaseStore(CFG.db_base_token)
     projects = list_projects(store)
     elements = []
@@ -64,7 +64,7 @@ def project_list_card() -> dict:
         elements.append({"tag": "markdown", "content": "项目表暂无项目。"})
     for p in projects:
         elements.append({"tag": "markdown",
-                         "content": f"**{p['项目ID']} {p['项目名称']}**（当前 {p['票数']} 票）"})
+                         "content": f"**{p['项目ID']} {p['项目名称']}**"})
         elements.append({"tag": "button",
                          "text": {"tag": "plain_text", "content": f"投给 {p['项目名称']}"},
                          "type": "primary", "size": "medium",
@@ -111,7 +111,7 @@ async def handle_vote_action(card_ctx: CardCtx) -> None:
         return
     store.batch_create(CFG.tbl_vote, [{"fields": {
         "投票人": [{"id": me["record_id"]}], "项目": [{"id": project_rid}]}}])
-    # 项目表票数 +1
+    # 项目表票数 +1（票数不公开，不回传具体数字）
     for p in store.list_records(CFG.tbl_project):
         if p["record_id"] == project_rid:
             cur = int((p.get("fields") or {}).get("票数") or 0)
@@ -122,12 +122,17 @@ async def handle_vote_action(card_ctx: CardCtx) -> None:
 
 
 async def handle_votes_board(ctx: MsgCtx) -> None:
+    """票榜：票数不公开，只展示排名不带数字（管理员可见票数）。"""
+    from ..sync import is_admin
     store = BaseStore(CFG.db_base_token)
     projects = sorted(list_projects(store), key=lambda x: -x["票数"])
+    show_votes = is_admin(ctx.open_id)
     lines = ["**当前票榜**", ""]
     for i, p in enumerate(projects, 1):
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
-        lines.append(f"{medal} **{p['项目名称']}** —— {p['票数']} 票")
+        lines.append(f"{medal} **{p['项目名称']}**" + (f" —— {p['票数']} 票" if show_votes else ""))
+    if not show_votes:
+        lines += ["", "票数暂不公开，最终结果以主办方公布为准。"]
     await send_card(ctx.open_id, result_card("票榜", True, lines))
 
 

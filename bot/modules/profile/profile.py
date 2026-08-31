@@ -50,6 +50,14 @@ def _find_me(store: BaseStore, open_id: str) -> dict | None:
     return None
 
 
+def _find_org_me(store: BaseStore, open_id: str) -> dict | None:
+    """组委会名单里的我（可能不存在）。"""
+    for r in store.list_records(CFG.tbl_organizers):
+        if str((r.get("fields") or {}).get("飞书open_id") or "") == open_id:
+            return r
+    return None
+
+
 def _team_lines(store: BaseStore, my_rid: str, name_by_rid: dict[str, str]) -> list[str]:
     """我在队伍表里的角色与队友。"""
     lines = []
@@ -104,33 +112,44 @@ def _team_contains_me(store: BaseStore, team_rids: list[str], my_rid: str) -> bo
 async def handle_profile(ctx: MsgCtx) -> None:
     store = BaseStore(CFG.db_base_token)
     me = _find_me(store, ctx.open_id)
-    if me is None:
+    org_me = _find_org_me(store, ctx.open_id)
+    if me is None and org_me is None:
         await send_card(ctx.open_id, result_card("个人中心", False, [
             "你还未完成验证，先发「验证」或点帮助卡片里的「验证身份」。"]))
         return
-    f = me.get("fields") or {}
-    my_rid = me["record_id"]
-    name = _text(f.get("姓名")) or "?"
-    cid = _text(f.get("选手ID")) or "?"
-    audit = _text(f.get("审核状态")) or "未审核"
-    verified = _text(f.get("验证状态")) or "未验证"
 
-    name_by_rid = {}
-    for r in store.list_records(CFG.tbl_contestants):
-        rf = r.get("fields") or {}
-        name_by_rid[r["record_id"]] = _text(rf.get("姓名")) or _text(rf.get("选手ID")) or "?"
-
-    lines = [
-        f"**{name}**（{cid}）",
-        f"- 验证状态：{'✅ ' if verified == '已验证' else '❌ '}{verified}",
-        f"- 审核状态：{'✅ ' if audit == '审核通过' else '⏳ '}{audit}",
-        "",
-        "**我的队伍**",
-        *_team_lines(store, my_rid, name_by_rid),
-        "",
-        "**项目提交状态**",
-        *_project_lines(store, my_rid, name_by_rid),
-    ]
+    lines = []
+    # 组委会身份块
+    if org_me is not None:
+        of = org_me.get("fields") or {}
+        oident = _text(of.get("身份")) or "主办方"
+        overified = _text(of.get("验证状态")) or "未验证"
+        lines += [
+            f"**{_text(of.get('姓名')) or '?'}**（组委会-{oident}）",
+            f"- 组委会验证：{'✅ ' if overified == '已验证' else '❌ '}{overified}",
+        ]
+    # 选手身份块
+    if me is not None:
+        f = me.get("fields") or {}
+        my_rid = me["record_id"]
+        name = _text(f.get("姓名")) or "?"
+        cid = _text(f.get("选手ID")) or "?"
+        audit = _text(f.get("审核状态")) or "未审核"
+        verified = _text(f.get("验证状态")) or "未验证"
+        if lines:
+            lines.append("")
+        lines += [
+            f"**{name}**（{cid}）",
+            f"- 验证状态：{'✅ ' if verified == '已验证' else '❌ '}{verified}",
+            f"- 审核状态：{'✅ ' if audit == '审核通过' else '⏳ '}{audit}",
+            "",
+            "**我的队伍**",
+            *_team_lines(store, my_rid, name_by_rid := {r["record_id"]: _text((r.get('fields') or {}).get('姓名')) or _text((r.get('fields') or {}).get('选手ID')) or "?"
+                                                        for r in store.list_records(CFG.tbl_contestants)}),
+            "",
+            "**项目提交状态**",
+            *_project_lines(store, my_rid, name_by_rid),
+        ]
     await send_card(ctx.open_id, result_card("个人中心", True, lines))
 
 
