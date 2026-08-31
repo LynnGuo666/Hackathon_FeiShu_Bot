@@ -194,5 +194,5 @@ async def handle_verify_submit(card_ctx: CardCtx) -> None:
     await reply(True, "验证成功", lines)
 
 
-REGISTRY.command("验证", "授权")(handle_verify)
+REGISTRY.command("验证", "授权", "验证身份")(handle_verify)
 REGISTRY.on_card("verify_submit")(handle_verify_submit)

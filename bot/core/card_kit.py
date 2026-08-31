@@ -42,21 +42,28 @@ def guide_card() -> dict:
                     btn("✅ 验证身份", "verify", "primary")],
                  "horizontal_align": "left"},
                 {"tag": "column", "width": "weighted", "weight": 1, "elements": [
-                    btn("🗳️ 去投票", "vote")],
+                    btn("👤 个人中心", "profile")],
                  "horizontal_align": "left"},
             ]},
             {"tag": "column_set", "flex_mode": "bisect", "columns": [
                 {"tag": "column", "width": "weighted", "weight": 1, "elements": [
+                    btn("🗳️ 去投票", "vote")],
+                 "horizontal_align": "left"},
+                {"tag": "column", "width": "weighted", "weight": 1, "elements": [
                     btn("🔥 活跃度排行", "activity")],
                  "horizontal_align": "left"},
+            ]},
+            {"tag": "column_set", "flex_mode": "bisect", "columns": [
                 {"tag": "column", "width": "weighted", "weight": 1, "elements": [
                     btn("📊 查看票榜", "votes_board")],
                  "horizontal_align": "left"},
+                {"tag": "column", "width": "weighted", "weight": 1, "elements": []},
             ]},
             {"tag": "hr"},
             {"tag": "markdown", "content":
                 "**全部指令**\n"
                 "- `验证` —— 绑定飞书账号与报名信息，审核通过后自动拉入交流群\n"
+                "- `个人中心` —— 我的选手 ID、队伍、项目提交状态\n"
                 "- `活跃` —— 群发言活跃度排行（加「今天」看当日）\n"
                 "- `投票` —— 决赛投票（一人一票）\n"
                 "- `票数` —— 查看当前票榜\n"

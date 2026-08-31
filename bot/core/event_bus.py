@@ -13,6 +13,10 @@ log = logging.getLogger(__name__)
 # 飞书会对超时/失败的事件重推，用 event_id 去重（保留 10 分钟窗口）
 _seen_events: dict[str, float] = {}
 _DEDUP_WINDOW = 600
+# 卡片回调幂等：SDK ws 对 CARD 帧不回 ACK，飞书会重推；按「操作者+卡片+动作」去重
+_seen_card_actions: dict[str, float] = _seen_events  # 复用同一个清理窗口字典会互相干扰，单独建
+_seen_card_actions = {}
+_CARD_DEDUP_WINDOW = 120  # 卡片操作 2 分钟内视为重复（正常点击不会这么密）
 
 
 def _dedup(event: dict) -> bool:
@@ -28,6 +32,22 @@ def _dedup(event: dict) -> bool:
         log.info("重复事件已跳过: %s", eid)
         return True
     _seen_events[eid] = now
+    return False
+
+
+def _card_dedup(ctx) -> bool:
+    """卡片回调幂等：同一操作者对同一张卡片的同一动作，2 分钟内只处理一次。
+
+    背景：lark-oapi ws 对卡片帧不回 ACK，飞书会重推卡片回调，导致一次点击多次执行。
+    """
+    now = time.time()
+    for k in [k for k, ts in _seen_card_actions.items() if now - ts > _CARD_DEDUP_WINDOW]:
+        _seen_card_actions.pop(k, None)
+    key = f"{ctx.open_id}:{ctx.message_id}:{ctx.action_value}"
+    if key in _seen_card_actions:
+        log.info("重复卡片回调已跳过: %s", key)
+        return True
+    _seen_card_actions[key] = now
     return False
 
 
@@ -110,6 +130,8 @@ async def handle_card_action(event: dict) -> None:
     if not ctx.open_id:
         log.warning("卡片回调缺少 operator.open_id，跳过: %s", list(event.keys()))
         return
+    if _card_dedup(ctx):
+        return
     # 企业外用户不响应卡片操作（投票等）
     if _is_external(event) and not CFG.allow_external_users:
         return
@@ -123,6 +145,7 @@ async def handle_card_action(event: dict) -> None:
     # 帮助卡片快捷按钮：把按钮 action 映射为对应文本指令复用现有处理器
     _GUIDE_BUTTON_COMMANDS = {
         "verify": "验证", "vote": "投票", "activity": "活跃", "votes_board": "票数",
+        "profile": "个人中心",
     }
     cmd = _GUIDE_BUTTON_COMMANDS.get(ctx.action_value)
     if cmd:
