@@ -6,6 +6,7 @@ from typing import Awaitable, Callable, Literal
 
 
 CommandScope = Literal["public", "user", "admin"]
+ChatScope = Literal["p2p", "group", "any"]
 
 
 @dataclass
@@ -48,6 +49,7 @@ class Registry:
     fallback: CommandHandler | None = None
     command_scopes: dict[str, CommandScope] = field(default_factory=dict)
     card_scopes: dict[str, CommandScope] = field(default_factory=dict)
+    command_chats: dict[str, ChatScope] = field(default_factory=dict)
 
     def on_group_message(self):
         """注册群消息钩子（每条群消息都会回调，参数 open_id/chat_id），用于活跃度等统计。"""
@@ -56,34 +58,42 @@ class Registry:
             return fn
         return deco
 
-    def command(self, *names: str, scope: CommandScope = "public"):
-        """注册文本指令，并声明它属于公共、用户或管理员侧。"""
+    def command(self, *names: str, scope: CommandScope = "public", chat: ChatScope = "p2p"):
+        """注册文本指令，并声明权限作用域与适用会话（默认仅私聊触发）。"""
         if scope not in ("public", "user", "admin"):
             raise ValueError(f"未知指令作用域: {scope}")
+        if chat not in ("p2p", "group", "any"):
+            raise ValueError(f"未知会话范围: {chat}")
 
         def deco(fn: CommandHandler):
             for n in names:
                 name = n.strip()
                 self.commands[name] = fn
                 self.command_scopes[name] = scope
+                self.command_chats[name] = chat
             return fn
         return deco
 
-    def user_command(self, *names: str):
+    def user_command(self, *names: str, chat: ChatScope = "p2p"):
         """注册用户侧指令。管理员也可以使用用户侧指令。"""
-        return self.command(*names, scope="user")
+        return self.command(*names, scope="user", chat=chat)
 
-    def admin_command(self, *names: str):
+    def admin_command(self, *names: str, chat: ChatScope = "p2p"):
         """注册管理员侧指令。事件路由层会统一执行权限校验。"""
-        return self.command(*names, scope="admin")
+        return self.command(*names, scope="admin", chat=chat)
 
-    def public_command(self, *names: str):
+    def public_command(self, *names: str, chat: ChatScope = "p2p"):
         """注册无需身份权限的公共指令。"""
-        return self.command(*names, scope="public")
+        return self.command(*names, scope="public", chat=chat)
 
     def allows_command(self, name: str, is_admin: bool) -> bool:
         """判断操作者是否可以执行指令。未声明的旧指令按公共处理。"""
         return self.command_scopes.get(name, "public") != "admin" or is_admin
+
+    def allows_chat(self, name: str, chat_type: str) -> bool:
+        """判断指令是否允许在该会话类型中触发。未声明的旧指令按仅私聊处理。"""
+        want = self.command_chats.get(name, "p2p")
+        return want == "any" or want == chat_type
 
     def on_card(self, action_value: str, scope: CommandScope = "public"):
         """注册卡片回调，并声明它属于公共、用户或管理员侧。"""

@@ -148,10 +148,6 @@ def _reply_org_result(open_id: str, rec: dict, ok: int, fail: str | None) -> Non
 
 
 async def handle_verify(ctx: MsgCtx) -> None:
-    if ctx.chat_type != "p2p":
-        await send_text(ctx.open_id, "请私聊我发送「验证」进行授权，避免手机号信息暴露在群里。")
-        return
-
     # 一次读取全量选手，后续查找复用
     contestants = _load_contestants()
 

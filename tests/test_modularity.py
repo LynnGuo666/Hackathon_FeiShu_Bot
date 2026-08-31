@@ -84,6 +84,40 @@ class EventRoutingTests(unittest.TestCase):
         self.assertEqual(calls, [])
         send_text.assert_awaited_once_with("ou_regular", "该指令仅限管理员使用。")
 
+    def test_p2p_command_is_silently_ignored_in_group(self):
+        from bot.core import event_bus
+
+        registry = Registry()
+        calls = []
+
+        async def handler(_ctx):
+            calls.append("handler")
+
+        async def fallback(_ctx):
+            calls.append("fallback")
+
+        registry.user_command("投票")(handler)
+        registry.on_fallback(fallback)
+        base_event = {
+            "sender": {"sender_id": {"open_id": "ou_regular"}},
+            "message": {
+                "message_type": "text",
+                "chat_type": "group",
+                "chat_id": "oc_group",
+                "message_id": "om_group",
+            },
+        }
+        # 群里发私聊指令：不触发处理器；群里发未知文本：也不回帮助卡片
+        for eid, text in (("test-group-cmd", "投票"), ("test-group-unknown", "随便聊聊")):
+            event = dict(base_event, header={"event_id": eid})
+            event["message"] = dict(base_event["message"],
+                                    content=json.dumps({"text": text}))
+            with patch.object(event_bus, "REGISTRY", registry), \
+                    patch.object(event_bus, "is_admin", return_value=False):
+                asyncio.run(event_bus.handle_message(event))
+
+        self.assertEqual(calls, [])
+
     def test_admin_command_reaches_handler_for_admin(self):
         from bot.core import event_bus
 

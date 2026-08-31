@@ -97,6 +97,8 @@ cp .env.example .env          # 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
 
 其他任意消息回复帮助卡片（含快捷按钮：验证 / 投票 / 活跃度 / 票榜，点按钮即触发）。
 
+**所有指令均仅在私聊触发**：在群里 @机器人 发指令不会被响应（静默忽略，不私聊用户；群发言活跃度统计照常）。群里回复帮助卡片也仅限私聊场景。
+
 ## 卡片
 
 全部使用**新版卡片 JSON 2.0**（`schema: "2.0"`）：帮助卡片带快捷操作按钮（behaviors callback），验证表单用 form 容器 + 提交按钮（`form_action_type: "submit"`），投票卡片每个项目一个回调按钮。回调事件仍为 `card.action.trigger`，按钮值在 `action.value`、表单值在 `action.form_value`。要求飞书客户端 7.20+（低版本只显示标题）。

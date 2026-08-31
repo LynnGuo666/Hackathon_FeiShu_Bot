@@ -101,7 +101,7 @@ async def handle_message(event: dict) -> None:
 
     # 企业外用户：默认只回帮助卡片，不执行任何指令（外部用户读不到手机号，验证无意义）
     if _is_external(event) and not CFG.allow_external_users:
-        if ctx.text in ("帮助", "help", "菜单"):
+        if ctx.chat_type == "p2p" and ctx.text in ("帮助", "help", "菜单"):
             handler = REGISTRY.fallback
             if handler:
                 await handler(ctx)
@@ -109,7 +109,12 @@ async def handle_message(event: dict) -> None:
 
     handler = REGISTRY.commands.get(ctx.text)
     if handler is None:
-        handler = REGISTRY.fallback
+        # 群里未知消息不回帮助卡片（帮助仅私聊提供），避免群消息触发机器人私聊用户
+        if ctx.chat_type == "p2p":
+            handler = REGISTRY.fallback
+    elif not REGISTRY.allows_chat(ctx.text, ctx.chat_type):
+        # 指令声明了适用会话（默认仅私聊）：群里触发私聊指令时静默忽略
+        handler = None
     elif not REGISTRY.allows_command(ctx.text, ctx.is_admin):
         # 权限判断集中在路由层，业务 handler 无需重复实现管理员校验。
         from .lark_client import send_text

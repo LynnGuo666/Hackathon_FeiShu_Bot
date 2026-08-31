@@ -75,9 +75,6 @@ def project_list_card() -> dict:
 
 
 async def handle_vote(ctx: MsgCtx) -> None:
-    if ctx.chat_type != "p2p":
-        await send_text(ctx.open_id, "请私聊我发送「投票」，一人一票。")
-        return
     if not is_vote_open():
         await send_card(ctx.open_id, result_card("投票未开放", False, ["投票通道当前已关闭，请等待主持人开票。"]))
         return
