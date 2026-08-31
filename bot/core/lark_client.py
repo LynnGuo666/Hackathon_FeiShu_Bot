@@ -167,7 +167,12 @@ def create_group(name: str, owner_open_id: str, member_open_ids: list[str],
         body = body.owner_id(owner_open_id)
     if member_open_ids:
         body = body.user_id_list(member_open_ids)
-    resp = client().im.v1.chat.create(CreateChatRequest.builder().request_body(body.build()).build())
+    request = CreateChatRequest.builder()
+    if external:
+        # External groups require a human owner; make the creating bot an admin
+        # so it can invite members after creation.
+        request = request.set_bot_manager(True)
+    resp = client().im.v1.chat.create(request.request_body(body.build()).build())
     if not resp.success():
         raise RuntimeError(f"建群失败: {resp.code} {resp.msg}")
     return resp.data.chat_id

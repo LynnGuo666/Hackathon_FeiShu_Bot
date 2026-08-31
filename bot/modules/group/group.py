@@ -193,7 +193,7 @@ async def handle_create_group(ctx: MsgCtx) -> None:
     """「建群 群名 [面向身份]」（管理员）：机器人建外部群并登记进群配置表。
 
     - 群主 = 发指令的管理员（外部群必须指定用户群主）；
-    - external=True，可拉外部成员；
+    - external=True，可拉外部成员，且建群机器人自动设为群管理员；
     - 建好后自动写入群配置表（启用，面向身份默认「选手」），后续验证/补拉自动覆盖。
     """
     from ...core.base_store import BaseStore

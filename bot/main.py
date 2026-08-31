@@ -35,7 +35,8 @@ log = logging.getLogger("bot")
 
 @REGISTRY.on_fallback
 async def fallback(ctx: MsgCtx) -> None:
-    await send_card(ctx.open_id, guide_card())
+    from .modules.sync import is_admin
+    await send_card(ctx.open_id, guide_card(is_admin_user=is_admin(ctx.open_id)))
 
 
 def _to_dict(obj) -> dict:
