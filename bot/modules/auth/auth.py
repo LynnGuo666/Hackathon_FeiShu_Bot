@@ -1,4 +1,12 @@
-"""验证授权模块：读取飞书账号手机号 -> 选手库比对 -> 绑定 open_id -> 触发拉群。"""
+"""验证授权模块。
+
+双通道验证：
+- 内部用户（同租户）：私聊发「验证」→ 自动读取飞书账号手机号比对（无感）。
+- 外部用户（跨租户，黑客松选手大多是这类）：通讯录 API 读不到其手机号，
+  改为回复授权卡片，用户填「手机号 + vx号」双因子，与选手库比对一致即通过。
+
+通过后绑定 open_id、更新验证状态，并触发拉群。
+"""
 from __future__ import annotations
 
 import logging
@@ -6,64 +14,174 @@ import logging
 from ...core.card_kit import result_card
 from ...core.config import CFG
 from ...core.lark_client import get_user_phone, send_card, send_text
-from ...core.registry import REGISTRY, MsgCtx
+from ...core.registry import REGISTRY, CardCtx, MsgCtx
 from ..group.group import pull_user_into_groups
-from ..sync.sync import normalize_phone
+from ..sync.sync import is_valid_phone, normalize_phone
 
 log = logging.getLogger(__name__)
 
 
-def lookup_contestant_by_phone(phone: str) -> dict | None:
+def _load_contestants() -> list[dict]:
+    """一次拉全量选手记录，流程内复用（避免多次全表扫描造成延迟）。"""
     from ...core.base_store import BaseStore
-    store = BaseStore(CFG.db_base_token)
-    recs = store.list_records(CFG.tbl_contestants)
-    for r in recs:
+    return BaseStore(CFG.db_base_token).list_records(CFG.tbl_contestants)
+
+
+def _find_by_phone(phone: str, contestants: list[dict] | None = None) -> dict | None:
+    for r in (contestants if contestants is not None else _load_contestants()):
         if normalize_phone((r.get("fields") or {}).get("手机号")) == phone:
             return r
     return None
+
+
+def _find_by_open_id(open_id: str, contestants: list[dict] | None = None) -> dict | None:
+    for r in (contestants if contestants is not None else _load_contestants()):
+        if str((r.get("fields") or {}).get("飞书open_id") or "") == open_id:
+            return r
+    return None
+
+
+def _vx_matches(fields: dict, vx_input: str) -> bool:
+    """vx号比对：去空格后全等或输入是 vx 号的后4位及以上尾部。"""
+    real = str(fields.get("vx号") or "").strip()
+    inp = vx_input.strip()
+    if not real or not inp:
+        return False
+    if real == inp:
+        return True
+    return len(inp) >= 4 and real.endswith(inp)
+
+
+def _approve(rec: dict, open_id: str) -> tuple[int, str | None]:
+    """绑定 open_id 并拉群，返回 (拉群成功数, 失败信息)。"""
+    from ...core.base_store import BaseStore
+    store = BaseStore(CFG.db_base_token)
+    store.batch_update(CFG.tbl_contestants, [{"record_id": rec["record_id"], "fields": {
+        "飞书open_id": open_id, "验证状态": "已验证"}}])
+    return pull_user_into_groups([{"open_id": open_id, "选手ID": str(rec["fields"].get("选手ID") or ""),
+                                   "record_id": rec["record_id"]}])
+
+
+def _reply_result(open_id: str, rec: dict, ok: int, fail: str | None) -> None:
+    f = rec.get("fields") or {}
+    name = str(f.get("姓名") or "")
+    cid = str(f.get("选手ID") or "")
+    lines = [f"欢迎 **{name}**（{cid}）！验证成功 ✅", "", f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else "")]
+    from ...core.lark_client import send_card as _send_card
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_send_card(open_id, result_card("验证成功", True, lines)))
+    except RuntimeError:
+        asyncio.run(_send_card(open_id, result_card("验证成功", True, lines)))
 
 
 async def handle_verify(ctx: MsgCtx) -> None:
     if ctx.chat_type != "p2p":
         await send_text(ctx.open_id, "请私聊我发送「验证」进行授权，避免手机号信息暴露在群里。")
         return
+
+    # 一次读取全量选手，后续查找复用
+    contestants = _load_contestants()
+
+    # 已验证用户直接提示
+    bound = _find_by_open_id(ctx.open_id, contestants)
+    if bound is not None:
+        await send_card(ctx.open_id, result_card("已验证", True, [
+            f"你已绑定选手 **{bound['fields'].get('姓名')}**（{bound['fields'].get('选手ID')}）。",
+            "如需换绑请联系管理员。"]))
+        return
+
+    # 内部用户：尝试自动读取手机号（外部用户会 41050，自动降级到卡片表单）
+    auto_phone = None
     try:
-        await send_text(ctx.open_id, "正在校验你的飞书账号手机号…")
-        phone = get_user_phone(ctx.open_id)
-    except RuntimeError as e:
-        await send_card(ctx.open_id, result_card("验证失败", False, [
-            f"无法读取你的手机号：{e}",
-            "请联系管理员在选手表中人工补录你的飞书信息。"]))
-        return
-    if not phone:
-        await send_card(ctx.open_id, result_card("验证失败", False, ["你的飞书账号未绑定手机号。"]))
+        auto_phone = get_user_phone(ctx.open_id)
+    except RuntimeError:
+        auto_phone = None
+
+    if auto_phone and is_valid_phone(normalize_phone(auto_phone)):
+        phone = normalize_phone(auto_phone)
+        rec = _find_by_phone(phone, contestants)
+        if rec is None:
+            await send_card(ctx.open_id, result_card("验证未通过", False, [
+                f"手机号 `{phone}` 不在选手名单中。",
+                "如果你已报名，请确认报名表中的手机号与本飞书账号一致，或发送「验证」改用手动方式。"]))
+            return
+        status = str((rec.get("fields") or {}).get("审核状态") or "").strip()
+        if status != "审核通过":
+            await send_card(ctx.open_id, result_card("验证未通过", False, [
+                f"你好 **{rec['fields'].get('姓名', '')}**，你的报名当前状态为「{status or '未审核'}」。",
+                "审核通过后再来验证即可自动拉入交流群。"]))
+            return
+        ok, fail = _approve(rec, ctx.open_id)
+        await _reply_result(ctx.open_id, rec, ok, fail)
         return
 
-    rec = lookup_contestant_by_phone(normalize_phone(phone))
+    # 外部用户 / 读不到手机号：回复授权卡片（手机号 + vx号 双因子）
+    await send_card(ctx.open_id, verify_form_card())
+
+
+def verify_form_card() -> dict:
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "选手授权验证"}, "template": "blue"},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content":
+                "无法自动读取你的手机号（企业外用户），请填写**报名表**中登记的信息完成验证："}},
+            {"tag": "form", "name": "verify_form",
+             "elements": [
+                 {"tag": "input", "name": "phone",
+                  "placeholder": {"tag": "plain_text", "content": "报名手机号"},
+                  "label": {"tag": "plain_text", "content": "手机号"}},
+                 {"tag": "input", "name": "vx",
+                  "placeholder": {"tag": "plain_text", "content": "报名时填写的 vx 号（或其后4位）"},
+                  "label": {"tag": "plain_text", "content": "vx号"}},
+                 {"tag": "button", "action_type": "form_submit",
+                  "name": "submit", "text": {"tag": "plain_text", "content": "提交验证"},
+                  "type": "primary", "value": {"action": "verify_submit"}},
+             ]},
+        ],
+    }
+
+
+async def handle_verify_submit(card_ctx: CardCtx) -> None:
+    """卡片表单提交：所有回执都原地更新原卡片，不发新消息。"""
+    from ...core.lark_client import update_card
+
+    async def reply(ok: bool, title: str, lines: list[str]) -> None:
+        await update_card(card_ctx.token, result_card(title, ok, lines))
+
+    form = card_ctx.form_value or {}
+    phone = normalize_phone(str(form.get("phone") or ""))
+    vx = str(form.get("vx") or "")
+    if not is_valid_phone(phone):
+        await reply(False, "验证未通过", ["手机号格式不正确，请填写 11 位大陆手机号。"])
+        return
+    contestants = _load_contestants()
+    # 已验证用户直接提示，避免重复绑定
+    bound = _find_by_open_id(card_ctx.open_id, contestants)
+    if bound is not None:
+        await reply(True, "已验证", [
+            f"你已绑定选手 **{bound['fields'].get('姓名')}**（{bound['fields'].get('选手ID')}），无需重复验证。"])
+        return
+    rec = _find_by_phone(phone, contestants)
     if rec is None:
-        await send_card(ctx.open_id, result_card("验证未通过", False, [
-            f"手机号 `{phone}` 不在选手名单中。",
-            "如果你已报名，请确认报名表中的手机号与本飞书账号一致，或联系管理员。"]))
+        await reply(False, "验证未通过", ["该手机号不在选手名单中。如果你已报名，请确认报名表中的手机号，或联系管理员。"])
         return
-
-    fields = rec.get("fields") or {}
-    status = str(fields.get("审核状态") or "").strip()
+    f = rec.get("fields") or {}
+    status = str(f.get("审核状态") or "").strip()
     if status != "审核通过":
-        await send_card(ctx.open_id, result_card("验证未通过", False, [
-            f"你好 **{fields.get('姓名', '')}**，你的报名当前状态为「{status or '未审核'}」。",
-            "审核通过后再来验证即可自动拉入交流群。"]))
+        await reply(False, "验证未通过", [f"你的报名当前状态为「{status or '未审核'}」，审核通过后再来验证。"])
         return
-
-    from ...core.base_store import BaseStore
-    store = BaseStore(CFG.db_base_token)
-    store.batch_update(CFG.tbl_contestants, [{"record_id": rec["record_id"], "fields": {
-        "飞书open_id": ctx.open_id, "验证状态": "已验证"}}])
-    name = str(fields.get("姓名") or "")
-    cid = str(fields.get("选手ID") or "")
-    ok, fail = pull_user_into_groups([{"open_id": ctx.open_id, "选手ID": cid, "record_id": rec["record_id"]}])
-    lines = [f"欢迎 **{name}**（{cid}）！验证成功 ✅", ""]
-    lines.append(f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else ""))
-    await send_card(ctx.open_id, result_card("验证成功", True, lines))
+    if not _vx_matches(f, vx):
+        await reply(False, "验证未通过", ["vx号与报名信息不一致，请检查（可填报名时登记的 vx 号或其后 4 位）。"])
+        return
+    ok, fail = _approve(rec, card_ctx.open_id)
+    name = str(f.get("姓名") or "")
+    cid = str(f.get("选手ID") or "")
+    lines = [f"欢迎 **{name}**（{cid}）！验证成功 ✅", "", f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else "")]
+    await reply(True, "验证成功", lines)
 
 
 REGISTRY.command("验证", "授权")(handle_verify)
+REGISTRY.on_card("verify_submit")(handle_verify_submit)

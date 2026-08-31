@@ -3,10 +3,32 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
+from .config import CFG
 from .registry import REGISTRY, CardCtx, MsgCtx
 
 log = logging.getLogger(__name__)
+
+# 飞书会对超时/失败的事件重推，用 event_id 去重（保留 10 分钟窗口）
+_seen_events: dict[str, float] = {}
+_DEDUP_WINDOW = 600
+
+
+def _dedup(event: dict) -> bool:
+    """返回 True 表示重复事件（应跳过）。"""
+    eid = str((event.get("header") or {}).get("event_id") or "")
+    if not eid:
+        return False
+    now = time.time()
+    # 顺手清理过期项
+    for k in [k for k, ts in _seen_events.items() if now - ts > _DEDUP_WINDOW]:
+        _seen_events.pop(k, None)
+    if eid in _seen_events:
+        log.info("重复事件已跳过: %s", eid)
+        return True
+    _seen_events[eid] = now
+    return False
 
 
 def _text_of(content: str) -> str:
@@ -19,7 +41,23 @@ def _text_of(content: str) -> str:
     return text.replace("@_user_1", "").strip()
 
 
+def _is_external(event: dict) -> bool:
+    """判断发送者是否企业外用户。
+
+    im.message.receive_v1 里 sender_type 只有 user/app，外部用户靠 tenant_key 与本租户不同来识别。
+    本租户 tenant_key 启动时从 tenant API 获取；拿不到时不拦截（宽松策略）。
+    """
+    sender = (event.get("sender") or {})
+    own = CFG.own_tenant_key
+    if not own:
+        return False
+    key = str(sender.get("tenant_key", ""))
+    return bool(key) and key != own
+
+
 async def handle_message(event: dict) -> None:
+    if _dedup(event):
+        return
     msg = event.get("message", {})
     sender = (event.get("sender") or {}).get("sender_id", {})
     open_id = sender.get("open_id", "")
@@ -28,6 +66,15 @@ async def handle_message(event: dict) -> None:
         return
     ctx = MsgCtx(open_id=open_id, chat_id=msg.get("chat_id", ""), chat_type=chat_type,
                  text=_text_of(msg.get("content", "")), message_id=msg.get("message_id", ""), raw=event)
+
+    # 企业外用户：默认只回帮助卡片，不执行任何指令（外部用户读不到手机号，验证无意义）
+    if _is_external(event) and not CFG.allow_external_users:
+        if ctx.text in ("帮助", "help", "菜单"):
+            handler = REGISTRY.fallback
+            if handler:
+                await handler(ctx)
+        return
+
     handler = REGISTRY.commands.get(ctx.text)
     if handler is None:
         handler = REGISTRY.fallback
@@ -46,16 +93,26 @@ async def handle_message(event: dict) -> None:
 
 
 async def handle_card_action(event: dict) -> None:
+    if _dedup(event):
+        return
     action = (event.get("action") or {})
+    # 卡片回调的操作者字段是 operator（消息事件里才是 sender_id）
+    operator = event.get("operator") or event.get("operator_id") or {}
     ctx = CardCtx(
-        open_id=event.get("operator_id", {}).get("open_id", ""),
-        message_id=event.get("context", {}).get("open_message_id", ""),
+        open_id=operator.get("open_id", ""),
+        message_id=(event.get("context") or {}).get("open_message_id", ""),
         chat_id=(event.get("context") or {}).get("open_chat_id", ""),
         action_value=str(action.get("value", {}).get("action", "")) if isinstance(action.get("value"), dict) else "",
         form_value=action.get("form_value") or {},
         token=event.get("token", ""),
         raw=event,
     )
+    if not ctx.open_id:
+        log.warning("卡片回调缺少 operator.open_id，跳过: %s", list(event.keys()))
+        return
+    # 企业外用户不响应卡片操作（投票等）
+    if _is_external(event) and not CFG.allow_external_users:
+        return
     handler = REGISTRY.card_actions.get(ctx.action_value)
     if handler is None:
         return

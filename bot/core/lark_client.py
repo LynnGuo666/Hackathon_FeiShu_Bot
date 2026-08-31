@@ -18,7 +18,7 @@ def client():
     return _CLIENT
 
 
-def send_text(open_id: str, text: str) -> None:
+async def send_text(open_id: str, text: str) -> None:
     """私聊发送文本消息。"""
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -35,7 +35,7 @@ def send_text(open_id: str, text: str) -> None:
         raise RuntimeError(f"发消息失败: {resp.code} {resp.msg}")
 
 
-def send_card(open_id: str, card: dict) -> str | None:
+async def send_card(open_id: str, card: dict) -> str | None:
     """私聊发送交互卡片，返回 message_id。"""
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -51,6 +51,45 @@ def send_card(open_id: str, card: dict) -> str | None:
     if not resp.success():
         raise RuntimeError(f"发卡片失败: {resp.code} {resp.msg}")
     return resp.data.message_id
+
+
+async def update_card(token: str, card: dict) -> None:
+    """通过卡片回调 token 原地更新卡片（回调后 30 分钟内有效，最多更新 2 次）。"""
+    import urllib.request
+
+    req = urllib.request.Request(
+        "https://open.feishu.cn/open-apis/interactive/v1/card/update",
+        data=json.dumps({"token": token, "card": card}).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {_tenant_token()}"})
+    resp = json.load(urllib.request.urlopen(req, timeout=10))
+    if resp.get("code") not in (0, None):
+        raise RuntimeError(f"更新卡片失败: {resp.get('code')} {resp.get('msg')}")
+
+
+_TENANT_TOKEN_CACHE: tuple[str, float] = ("", 0.0)
+
+
+def _tenant_token() -> str:
+    """bot tenant_access_token（带 5 分钟缓存）。"""
+    import time
+    import urllib.request
+
+    global _TENANT_TOKEN_CACHE
+    tok, ts = _TENANT_TOKEN_CACHE
+    if tok and time.time() - ts < 300:
+        return tok
+    from .config import CFG
+
+    req = urllib.request.Request(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        data=json.dumps({"app_id": CFG.app_id, "app_secret": CFG.app_secret}).encode(),
+        headers={"Content-Type": "application/json"})
+    d = json.load(urllib.request.urlopen(req, timeout=10))
+    if d.get("code") != 0:
+        raise RuntimeError(f"获取 tenant_token 失败: {d.get('msg')}")
+    _TENANT_TOKEN_CACHE = (d["tenant_access_token"], time.time())
+    return _TENANT_TOKEN_CACHE[0]
 
 
 def get_user_phone(open_id: str) -> str | None:

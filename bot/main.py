@@ -49,15 +49,30 @@ def _to_dict(obj) -> dict:
 
 
 def _run_async(coro):
-    """在事件回调线程里跑协程（SDK 回调是同步入口）。"""
+    """在事件回调线程里调度协程，立即返回 ACK（不阻塞等待）。
+
+    SDK 回调若超时未返回，飞书会认为投递失败并重推事件，导致重复处理；
+    因此这里只提交任务到后台循环，不做 .result() 同步等待。
+    """
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=25)
+        loop = _BACKGROUND_LOOP
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, loop)
             return
     except RuntimeError:
         pass
     asyncio.run(coro)
+
+
+_BACKGROUND_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _start_background_loop():
+    """独立事件循环线程：所有事件处理协程跑在这里，互不阻塞 ws 心跳。"""
+    global _BACKGROUND_LOOP
+    loop = asyncio.new_event_loop()
+    _BACKGROUND_LOOP = loop
+    threading.Thread(target=loop.run_forever, daemon=True, name="bot-event-loop").start()
 
 
 def build_dispatcher():
@@ -95,6 +110,28 @@ def _job_wrapper(fn):
     return run
 
 
+def fetch_tenant_key() -> None:
+    """启动时获取本租户 tenant_key，用于识别外部用户（失败不阻塞启动）。"""
+    import urllib.request
+
+    from .core.config import CFG
+    if CFG.own_tenant_key or not CFG.has_app_credentials:
+        return
+    try:
+        req = urllib.request.Request(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            data=json.dumps({"app_id": CFG.app_id, "app_secret": CFG.app_secret}).encode(),
+            headers={"Content-Type": "application/json"})
+        tok = json.load(urllib.request.urlopen(req, timeout=10))["tenant_access_token"]
+        api = urllib.request.Request("https://open.feishu.cn/open-apis/tenant/v2/tenant/query",
+                                     headers={"Authorization": f"Bearer {tok}"})
+        d = json.load(urllib.request.urlopen(api, timeout=10))
+        CFG.own_tenant_key = str((d.get("data") or {}).get("tenant", {}).get("tenant_key") or "")
+        log.info("本租户 tenant_key: %s", CFG.own_tenant_key)
+    except Exception as e:
+        log.warning("获取 tenant_key 失败（外部用户拦截将不生效）: %s", e)
+
+
 def main() -> None:
     import lark_oapi as lark
     from lark_oapi.ws import Client as WsClient
@@ -103,6 +140,8 @@ def main() -> None:
     if not CFG.has_app_credentials:
         raise SystemExit("缺少 FEISHU_APP_ID / FEISHU_APP_SECRET，请复制 .env.example 为 .env 并填写。")
 
+    fetch_tenant_key()
+    _start_background_loop()
     start_scheduler()
 
     ws = WsClient(CFG.app_id, CFG.app_secret,

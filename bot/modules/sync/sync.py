@@ -5,7 +5,7 @@
 - 同一手机号多次出现（主报名人 + 多个队伍的队友）只保留一条选手记录；
   字段合并时优先取主报名人行，其次先到先得。
 - 队友关系按报名记录写入队伍表（队长=主报名人，队友=link 到选手）。
-- 增量：按手机号比对已有选手，已存在则更新，否则分配新 选手ID（WY-XXXX）。
+- 增量：按手机号比对已有选手，已存在则更新，否则分配新 选手ID（WY01-XXXX）。
 """
 from __future__ import annotations
 
@@ -143,7 +143,8 @@ def run_sync(store: BaseStore | None = None, reg_store: BaseStore | None = None)
         ph = normalize_phone(f.get("手机号"))
         if ph:
             by_phone[ph] = r
-            m = re.match(r"WY-(\d+)", _text(f.get("选手ID")))
+            # 兼容旧格式 WY-0001 与新格式 WY01-0001
+            m = re.match(r"WY(?:01)?-(\d+)", _text(f.get("选手ID")))
             if m:
                 max_seq = max(max_seq, int(m.group(1)))
 
@@ -182,7 +183,7 @@ def run_sync(store: BaseStore | None = None, reg_store: BaseStore | None = None)
                 to_update.append({"record_id": old["record_id"], "fields": diff})
         else:
             max_seq += 1
-            row["选手ID"] = f"WY-{max_seq:04d}"
+            row["选手ID"] = f"WY01-{max_seq:04d}"
             row["验证状态"] = "未验证"
             row["入群状态"] = "未入群"
             to_create.append(row)

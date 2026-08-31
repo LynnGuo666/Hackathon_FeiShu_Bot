@@ -4,7 +4,7 @@
 - sdk：lark-oapi（bot 身份，需 FEISHU_APP_ID/SECRET，且应用需有 bitable:app 权限并被加为 Base 协作者）
 - cli：本机 lark-cli（默认；无需应用凭证，走用户身份）
 
-通过环境变量 BASE_BACKEND=sdk|cli 切换，默认 cli。
+通过环境变量 BASE_BACKEND=sdk|cli 切换，默认 sdk（bot 身份）。
 """
 from __future__ import annotations
 
@@ -140,33 +140,51 @@ class BaseStore:
         return records
 
     def _sdk_batch_create(self, table: str, rows: list[dict]) -> list[dict]:
-        from lark_oapi.api.bitable.v1 import (AppTableRecordForCreate, BatchCreateAppTableRecordRequest,
-                                              ReqAppTableRecordForCreate)
+        from lark_oapi.api.bitable.v1 import (BatchCreateAppTableRecordRequest,
+                                              BatchCreateAppTableRecordRequestBody)
 
         client = _sdk_client()
-        body = ReqAppTableRecordForCreate.builder()
-        body.records([AppTableRecordForCreate.builder().fields(r).build() for r in rows])
-        req = BatchCreateAppTableRecordRequest.builder().app_token(self.base_token).table_id(self.resolve_table_id(table)).request_body(body.build())
+        body = BatchCreateAppTableRecordRequestBody.builder()
+        body.records([{"fields": _to_sdk_fields(r)} for r in rows])
+        req = (BatchCreateAppTableRecordRequest.builder()
+               .app_token(self.base_token)
+               .table_id(self.resolve_table_id(table))
+               .request_body(body.build()))
         resp = client.bitable.v1.app_table_record.batch_create(req.build())
         if not resp.success():
             raise RuntimeError(f"SDK 批量新建失败: {resp.code} {resp.msg}")
         return [{"record_id": it.record_id, "fields": it.fields} for it in (resp.data.records or [])]
 
     def _sdk_batch_update(self, table: str, items: list[dict]) -> None:
-        from lark_oapi.api.bitable.v1 import (AppTableRecordForUpdate, BatchUpdateAppTableRecordRequest,
-                                              ReqAppTableRecordForUpdate)
+        from lark_oapi.api.bitable.v1 import (BatchUpdateAppTableRecordRequest,
+                                              BatchUpdateAppTableRecordRequestBody)
 
         client = _sdk_client()
-        body = ReqAppTableRecordForUpdate.builder()
-        body.records([AppTableRecordForUpdate.builder().record_id(it["record_id"]).fields(it["fields"]).build() for it in items])
-        req = BatchUpdateAppTableRecordRequest.builder().app_token(self.base_token).table_id(self.resolve_table_id(table)).request_body(body.build())
+        body = BatchUpdateAppTableRecordRequestBody.builder()
+        body.records([{"record_id": it["record_id"], "fields": _to_sdk_fields(it["fields"])} for it in items])
+        req = (BatchUpdateAppTableRecordRequest.builder()
+               .app_token(self.base_token)
+               .table_id(self.resolve_table_id(table))
+               .request_body(body.build()))
         resp = client.bitable.v1.app_table_record.batch_update(req.build())
         if not resp.success():
             raise RuntimeError(f"SDK 批量更新失败: {resp.code} {resp.msg}")
 
 
 def _env_backend() -> str:
-    return os.environ.get("BASE_BACKEND", "cli").strip().lower()
+    """默认 sdk（bot 身份，生产路径）；cli 仅用于本地调试（依赖 lark-cli 登录态）。"""
+    return os.environ.get("BASE_BACKEND", "sdk").strip().lower()
+
+
+def _to_sdk_fields(fields: dict) -> dict:
+    """CLI 形态字段值 -> SDK 形态。link 字段：[{"id":...}] -> ["rec..."]（SingleLink 只接受 record_id 字符串列表）。"""
+    out = {}
+    for k, v in fields.items():
+        if isinstance(v, list) and v and isinstance(v[0], dict) and "id" in v[0]:
+            out[k] = [x["id"] for x in v if isinstance(x, dict) and x.get("id")]
+        else:
+            out[k] = v
+    return out
 
 
 _SDK_CLIENT = None
