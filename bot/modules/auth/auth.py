@@ -356,7 +356,7 @@ async def handle_bind(ctx: MsgCtx) -> None:
     from ...core.base_store import BaseStore
     parts = ctx.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await send_text(ctx.open_id, "用法：绑定 <绑定码>（绑定码由组委会创建名单时生成）")
+        await send_text(ctx.open_id, "用法：绑定 <绑定码>（绑定码由组委会创建名单时生成，可用「生成绑定码」指令批量补齐）")
         return
     code = parts[1].strip()
     store = BaseStore(CFG.db_base_token)
@@ -395,3 +395,43 @@ async def handle_bind(ctx: MsgCtx) -> None:
 
 
 REGISTRY.command("绑定")(handle_bind)
+
+
+def _gen_bind_code() -> str:
+    """生成随机绑定码：ZZB-XXXXXXXX（8 位，去掉易混淆字符 I/L/O/0/1）。"""
+    import secrets
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    return "ZZB-" + "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+async def handle_gen_codes(ctx: MsgCtx) -> None:
+    """「生成绑定码」（管理员）：给组委会表里所有绑定码为空的记录生成随机绑定码，
+    并私聊回执全部「姓名 -> 绑定码」清单（发给操作者，由其分发给各成员）。"""
+    from ...core.base_store import BaseStore
+    from ..sync import is_admin
+    if not is_admin(ctx.open_id):
+        await send_text(ctx.open_id, "该指令仅限管理员使用。")
+        return
+    store = BaseStore(CFG.db_base_token)
+    updates, listing = [], []
+    used = set()
+    for r in store.list_records(CFG.tbl_organizers):
+        f = r.get("fields") or {}
+        if str(f.get("绑定码") or "").strip():
+            used.add(str(f["绑定码"]).strip())  # 已有码也纳入查重
+            continue
+        code = _gen_bind_code()
+        while code in used:
+            code = _gen_bind_code()
+        used.add(code)
+        updates.append({"record_id": r["record_id"], "fields": {"绑定码": code}})
+        listing.append(f"- **{_text(f.get('姓名')) or '?'}**（{_text(f.get('身份')) or '主办方'}）：`{code}`")
+    if not updates:
+        await send_card(ctx.open_id, result_card("生成绑定码", True, ["所有组委会成员都已有绑定码，无需生成。"]))
+        return
+    store.batch_update(CFG.tbl_organizers, updates)
+    await send_card(ctx.open_id, result_card("绑定码已生成", True, [
+        f"共生成 {len(updates)} 个，请分发给对应成员：", "", *listing]))
+
+
+REGISTRY.command("生成绑定码")(handle_gen_codes)

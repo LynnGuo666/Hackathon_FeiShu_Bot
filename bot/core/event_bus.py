@@ -87,6 +87,10 @@ async def handle_message(event: dict) -> None:
     ctx = MsgCtx(open_id=open_id, chat_id=msg.get("chat_id", ""), chat_type=chat_type,
                  text=_text_of(msg.get("content", "")), message_id=msg.get("message_id", ""), raw=event)
 
+    # 记录发送者身份（含外部用户 open_id，便于排查/拉群）
+    if _is_external(event):
+        log.info("收到外部用户消息: open_id=%s chat_type=%s text=%r", open_id, chat_type, ctx.text[:20])
+
     # 企业外用户：默认只回帮助卡片，不执行任何指令（外部用户读不到手机号，验证无意义）
     if _is_external(event) and not CFG.allow_external_users:
         if ctx.text in ("帮助", "help", "菜单"):

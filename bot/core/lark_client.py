@@ -149,6 +149,40 @@ def list_member_ids(chat_id: str) -> set[str]:
     return out
 
 
+def create_group(name: str, owner_open_id: str, member_open_ids: list[str],
+                 description: str = "", external: bool = True) -> str:
+    """机器人建群，返回 chat_id。
+
+    - external=True 建外部群（可拉外部成员），此时必须指定用户当群主（机器人不能当外部群群主）；
+    - external=False 建内部群，机器人自己当群主（拉人不受「仅管理员」限制，但不能拉外部成员）。
+    """
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import CreateChatRequest, CreateChatRequestBody
+
+    body = (CreateChatRequestBody.builder()
+            .name(name)
+            .description(description)
+            .external(external))
+    if external:
+        body = body.owner_id(owner_open_id)
+    if member_open_ids:
+        body = body.user_id_list(member_open_ids)
+    resp = client().im.v1.chat.create(CreateChatRequest.builder().request_body(body.build()).build())
+    if not resp.success():
+        raise RuntimeError(f"建群失败: {resp.code} {resp.msg}")
+    return resp.data.chat_id
+
+
+def disband_group(chat_id: str) -> None:
+    """机器人解散群（机器人须是群主）。"""
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import DeleteChatRequest
+
+    resp = client().im.v1.chat.delete(DeleteChatRequest.builder().chat_id(chat_id).build())
+    if not resp.success():
+        raise RuntimeError(f"解散群失败: {resp.code} {resp.msg}")
+
+
 def add_members(chat_id: str, open_ids: list[str]) -> tuple[int, str | None]:
     """把 open_id 列表拉入群，返回 (成功数, 错误信息)。"""
     import lark_oapi as lark
@@ -162,6 +196,6 @@ def add_members(chat_id: str, open_ids: list[str]) -> tuple[int, str | None]:
     resp = client().im.v1.chat_members.create(req)
     if not resp.success():
         return 0, f"{resp.code} {resp.msg}"
-    failed = [r.fail for r in (resp.data.invalid_list or []) if r and r.fail]
+    failed = [r.fail for r in (resp.data.invalid_id_list or []) if r and r.fail]
     ok = len(open_ids) - len(failed)
     return ok, (f"{len(failed)} 人失败: {failed[:3]}" if failed else None)
