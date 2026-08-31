@@ -18,13 +18,15 @@ from .core.event_bus import handle_card_action, handle_message
 from .core.lark_client import send_card
 from .core.registry import REGISTRY, MsgCtx
 
-# 导入即注册：sync（同步指令+定时同步）、auth（验证）、group（补拉）、activity（活跃度）、vote（投票）
+# 导入即注册：sync（同步指令+定时同步+管理员）、auth（验证）、group（补拉）、activity（活跃度）、vote（投票）
 from .modules.sync import sync  # noqa: F401
 from .modules.auth import auth  # noqa: F401
 from .modules.group import group  # noqa: F401
 from .modules.activity import activity  # noqa: F401
 from .modules.vote import vote  # noqa: F401
 from .modules.score import score  # noqa: F401
+
+from .modules.sync import refresh_admins
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("bot")
@@ -141,6 +143,7 @@ def main() -> None:
         raise SystemExit("缺少 FEISHU_APP_ID / FEISHU_APP_SECRET，请复制 .env.example 为 .env 并填写。")
 
     fetch_tenant_key()
+    refresh_admins()
     _start_background_loop()
     start_scheduler()
 

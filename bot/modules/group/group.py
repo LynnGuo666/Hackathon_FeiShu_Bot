@@ -14,6 +14,7 @@ from ...core.config import CFG
 from ...core.lark_client import add_members, list_member_ids, send_card, send_text
 from ...core.registry import REGISTRY, MsgCtx
 from ..sync import is_admin
+from ..sync.sync import audit_status
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +100,37 @@ async def auto_backfill_job() -> None:
     ok, fail = pull_user_into_groups(verified_users(BaseStore(CFG.db_base_token)))
     if ok or fail:
         log.info("自动补拉: 成功 %d 人次%s", ok, f"，失败: {fail}" if fail else "")
+
+
+async def promote_approved() -> int:
+    """审核通过补拉：扫描「已验证但审核状态≠审核通过」的选手，
+    审核状态后来变为「审核通过」的自动拉入所有启用群。返回处理人数。
+
+    背景：验证 = 绑定身份，与审核解耦；未审核通过的用户验证成功后先不入群，
+    等报名审核通过后由本任务自动补拉（无需重新验证）。
+    """
+    store = BaseStore(CFG.db_base_token)
+    targets = []
+    for r in store.list_records(CFG.tbl_contestants):
+        f = r.get("fields") or {}
+        if str(f.get("验证状态") or "") != "已验证" or not f.get("飞书open_id"):
+            continue
+        if audit_status(f) == "审核通过":
+            targets.append({"open_id": str(f["飞书open_id"]), "选手ID": str(f.get("选手ID") or ""),
+                            "record_id": r["record_id"]})
+    if not targets:
+        return 0
+    ok, fail = pull_user_into_groups(targets)
+    if ok or fail:
+        log.info("审核通过补拉: %d 名选手，成功 %d 人次%s", len(targets), ok, f"，失败: {fail}" if fail else "")
+    return len(targets)
+
+
+@REGISTRY.job("审核通过补拉", CFG.backfill_interval_minutes)
+async def promote_approved_job() -> None:
+    if CFG.backfill_interval_minutes <= 0:
+        return
+    await promote_approved()
 
 
 REGISTRY.command("补拉")(handle_backfill)

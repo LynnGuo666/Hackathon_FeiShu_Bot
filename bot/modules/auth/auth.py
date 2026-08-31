@@ -16,7 +16,7 @@ from ...core.config import CFG
 from ...core.lark_client import get_user_phone, send_card, send_text
 from ...core.registry import REGISTRY, CardCtx, MsgCtx
 from ..group.group import pull_user_into_groups
-from ..sync.sync import is_valid_phone, normalize_phone
+from ..sync.sync import audit_status, is_valid_phone, normalize_phone
 
 log = logging.getLogger(__name__)
 
@@ -52,21 +52,29 @@ def _vx_matches(fields: dict, vx_input: str) -> bool:
     return len(inp) >= 4 and real.endswith(inp)
 
 
-def _approve(rec: dict, open_id: str) -> tuple[int, str | None]:
-    """绑定 open_id 并拉群，返回 (拉群成功数, 失败信息)。"""
+def _approve(rec: dict, open_id: str) -> tuple[int, str | None, bool]:
+    """绑定 open_id 并标记已验证；审核通过则拉群。返回 (拉群成功数, 失败信息, 是否已拉群)。"""
     from ...core.base_store import BaseStore
     store = BaseStore(CFG.db_base_token)
     store.batch_update(CFG.tbl_contestants, [{"record_id": rec["record_id"], "fields": {
         "飞书open_id": open_id, "验证状态": "已验证"}}])
-    return pull_user_into_groups([{"open_id": open_id, "选手ID": str(rec["fields"].get("选手ID") or ""),
-                                   "record_id": rec["record_id"]}])
+    if audit_status(rec.get("fields") or {}) != "审核通过":
+        return 0, None, False
+    ok, fail = pull_user_into_groups([{"open_id": open_id, "选手ID": str(rec["fields"].get("选手ID") or ""),
+                                       "record_id": rec["record_id"]}])
+    return ok, fail, True
 
 
-def _reply_result(open_id: str, rec: dict, ok: int, fail: str | None) -> None:
+def _reply_result(open_id: str, rec: dict, ok: int, fail: str | None, pulled: bool = True) -> None:
     f = rec.get("fields") or {}
     name = str(f.get("姓名") or "")
     cid = str(f.get("选手ID") or "")
-    lines = [f"欢迎 **{name}**（{cid}）！验证成功 ✅", "", f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else "")]
+    if pulled:
+        lines = [f"欢迎 **{name}**（{cid}）！验证成功 ✅", "", f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else "")]
+    else:
+        lines = [f"**{name}**（{cid}），身份验证成功 ✅", "",
+                 f"- 你的报名当前状态为「{audit_status(f) or '未审核'}」，审核通过后会自动拉你进入交流群。",
+                 "- 无需重新验证，届时机器人会自动处理。"]
     from ...core.lark_client import send_card as _send_card
     import asyncio
     try:
@@ -107,14 +115,9 @@ async def handle_verify(ctx: MsgCtx) -> None:
                 f"手机号 `{phone}` 不在选手名单中。",
                 "如果你已报名，请确认报名表中的手机号与本飞书账号一致，或发送「验证」改用手动方式。"]))
             return
-        status = str((rec.get("fields") or {}).get("审核状态") or "").strip()
-        if status != "审核通过":
-            await send_card(ctx.open_id, result_card("验证未通过", False, [
-                f"你好 **{rec['fields'].get('姓名', '')}**，你的报名当前状态为「{status or '未审核'}」。",
-                "审核通过后再来验证即可自动拉入交流群。"]))
-            return
-        ok, fail = _approve(rec, ctx.open_id)
-        await _reply_result(ctx.open_id, rec, ok, fail)
+        # 验证 = 绑定身份，与审核解耦：未审核通过也绑定，审核通过后由自动补拉任务拉群
+        ok, fail, pulled = _approve(rec, ctx.open_id)
+        await _reply_result(ctx.open_id, rec, ok, fail, pulled)
         return
 
     # 外部用户 / 读不到手机号：回复授权卡片（手机号 + vx号 双因子）
@@ -169,17 +172,19 @@ async def handle_verify_submit(card_ctx: CardCtx) -> None:
         await reply(False, "验证未通过", ["该手机号不在选手名单中。如果你已报名，请确认报名表中的手机号，或联系管理员。"])
         return
     f = rec.get("fields") or {}
-    status = str(f.get("审核状态") or "").strip()
-    if status != "审核通过":
-        await reply(False, "验证未通过", [f"你的报名当前状态为「{status or '未审核'}」，审核通过后再来验证。"])
-        return
     if not _vx_matches(f, vx):
         await reply(False, "验证未通过", ["vx号与报名信息不一致，请检查（可填报名时登记的 vx 号或其后 4 位）。"])
         return
-    ok, fail = _approve(rec, card_ctx.open_id)
+    # 验证 = 绑定身份，与审核解耦：未审核通过也绑定，审核通过后由自动补拉任务拉群
+    ok, fail, pulled = _approve(rec, card_ctx.open_id)
     name = str(f.get("姓名") or "")
     cid = str(f.get("选手ID") or "")
-    lines = [f"欢迎 **{name}**（{cid}）！验证成功 ✅", "", f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else "")]
+    if pulled:
+        lines = [f"欢迎 **{name}**（{cid}）！验证成功 ✅", "", f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else "")]
+    else:
+        lines = [f"**{name}**（{cid}），身份验证成功 ✅", "",
+                 f"- 你的报名当前状态为「{audit_status(f) or '未审核'}」，审核通过后会自动拉你进入交流群。",
+                 "- 无需重新验证，届时机器人会自动处理。"]
     await reply(True, "验证成功", lines)
 
 

@@ -37,6 +37,14 @@ def is_valid_phone(phone: str) -> bool:
     return bool(VALID_PHONE_RE.match(phone))
 
 
+def audit_status(fields: dict) -> str:
+    """审核状态读回可能是字符串或 [选项] 列表，统一取字符串。"""
+    v = fields.get("审核状态")
+    if isinstance(v, list):
+        return str(v[0]).strip() if v else ""
+    return str(v or "").strip()
+
+
 def _text(cell) -> str:
     """bitable 文本字段可能是字符串或 [{text:...}] 分段数组。"""
     if cell is None:
