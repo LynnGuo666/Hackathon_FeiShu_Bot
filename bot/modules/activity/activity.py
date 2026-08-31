@@ -127,7 +127,6 @@ def leaderboard(top_n: int = 10, daily: bool = False) -> list[tuple[str, int]]:
 
 
 async def handle_activity(ctx: MsgCtx) -> None:
-    from ..sync import is_admin
     daily = "今天" in ctx.text
     board = leaderboard(10, daily=daily)
     title = "今日发言排行" if daily else "发言活跃度排行（累计）"
@@ -138,20 +137,22 @@ async def handle_activity(ctx: MsgCtx) -> None:
         for i, (name, n) in enumerate(board, 1):
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
             lines.append(f"{medal} **{name}** —— {n} 条")
-    if is_admin(ctx.open_id):
+    if ctx.is_admin:
         total = sum(n for _, n in leaderboard(10**9))
         lines += ["", f"选手总发言（累计）：{total} 条"]
     await send_card(ctx.open_id, result_card("活跃度排行", True, lines))
 
 
-REGISTRY.command("活跃", "活跃度")(handle_activity)
-
-
-@REGISTRY.on_group_message()
 async def count_group_message(open_id: str, chat_id: str) -> None:
     record_message(open_id)
 
 
-@REGISTRY.job("活跃度落库", 1)
 async def flush_job() -> None:
     flush()
+
+
+def register() -> None:
+    """注册用户侧活跃度指令、群消息钩子和落库任务。"""
+    REGISTRY.user_command("活跃", "活跃度")(handle_activity)
+    REGISTRY.on_group_message()(count_group_message)
+    REGISTRY.job("活跃度落库", 1)(flush_job)

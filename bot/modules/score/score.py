@@ -66,4 +66,6 @@ async def handle_my_score(ctx: MsgCtx) -> None:
     await send_card(ctx.open_id, result_card("我的积分", True, lines))
 
 
-REGISTRY.command("查分", "积分")(handle_my_score)
+def register() -> None:
+    """注册用户侧积分查询指令。"""
+    REGISTRY.user_command("查分", "积分")(handle_my_score)

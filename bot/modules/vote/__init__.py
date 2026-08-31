@@ -1,1 +1,1 @@
-from . import vote  # noqa: F401  导入即注册指令与卡片回调
+"""投票领域模块，由 ``modules.user`` 统一装配。"""

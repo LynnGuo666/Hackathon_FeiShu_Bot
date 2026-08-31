@@ -341,11 +341,6 @@ async def handle_org_verify_submit(card_ctx: CardCtx) -> None:
         f"- 已拉入 {ok} 个组委会群" + (f"（{fail}）" if fail else "")])
 
 
-REGISTRY.command("验证", "授权", "验证身份")(handle_verify)
-REGISTRY.on_card("verify_submit")(handle_verify_submit)
-REGISTRY.on_card("org_verify_submit")(handle_org_verify_submit)
-
-
 async def handle_bind(ctx: MsgCtx) -> None:
     """「绑定 <码>」：已验证用户用组委会绑定码额外绑定组委会身份（如以选手身份报名的导师）。
 
@@ -394,44 +389,9 @@ async def handle_bind(ctx: MsgCtx) -> None:
         "- 你的选手身份不受影响。"]))
 
 
-REGISTRY.command("绑定")(handle_bind)
-
-
-def _gen_bind_code() -> str:
-    """生成随机绑定码：ZZB-XXXXXXXX（8 位，去掉易混淆字符 I/L/O/0/1）。"""
-    import secrets
-    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-    return "ZZB-" + "".join(secrets.choice(alphabet) for _ in range(8))
-
-
-async def handle_gen_codes(ctx: MsgCtx) -> None:
-    """「生成绑定码」（管理员）：给组委会表里所有绑定码为空的记录生成随机绑定码，
-    并私聊回执全部「姓名 -> 绑定码」清单（发给操作者，由其分发给各成员）。"""
-    from ...core.base_store import BaseStore
-    from ..sync import is_admin
-    if not is_admin(ctx.open_id):
-        await send_text(ctx.open_id, "该指令仅限管理员使用。")
-        return
-    store = BaseStore(CFG.db_base_token)
-    updates, listing = [], []
-    used = set()
-    for r in store.list_records(CFG.tbl_organizers):
-        f = r.get("fields") or {}
-        if str(f.get("绑定码") or "").strip():
-            used.add(str(f["绑定码"]).strip())  # 已有码也纳入查重
-            continue
-        code = _gen_bind_code()
-        while code in used:
-            code = _gen_bind_code()
-        used.add(code)
-        updates.append({"record_id": r["record_id"], "fields": {"绑定码": code}})
-        listing.append(f"- **{_text(f.get('姓名')) or '?'}**（{_text(f.get('身份')) or '主办方'}）：`{code}`")
-    if not updates:
-        await send_card(ctx.open_id, result_card("生成绑定码", True, ["所有组委会成员都已有绑定码，无需生成。"]))
-        return
-    store.batch_update(CFG.tbl_organizers, updates)
-    await send_card(ctx.open_id, result_card("绑定码已生成", True, [
-        f"共生成 {len(updates)} 个，请分发给对应成员：", "", *listing]))
-
-
-REGISTRY.command("生成绑定码")(handle_gen_codes)
+def register() -> None:
+    """注册用户侧验证、绑定指令和表单回调。"""
+    REGISTRY.user_command("验证", "授权", "验证身份")(handle_verify)
+    REGISTRY.on_card("verify_submit", scope="user")(handle_verify_submit)
+    REGISTRY.on_card("org_verify_submit", scope="user")(handle_org_verify_submit)
+    REGISTRY.user_command("绑定")(handle_bind)

@@ -13,12 +13,9 @@ from ...core.card_kit import result_card
 from ...core.config import CFG
 from ...core.lark_client import send_card, send_text
 from ...core.registry import REGISTRY, CardCtx, MsgCtx
+from .state import is_vote_open
 
 log = logging.getLogger(__name__)
-
-# 投票开关（内存态；重启后默认开启，可用关票指令关闭）
-vote_open = True
-
 
 def list_projects(store: BaseStore) -> list[dict]:
     out = []
@@ -78,11 +75,10 @@ def project_list_card() -> dict:
 
 
 async def handle_vote(ctx: MsgCtx) -> None:
-    global vote_open
     if ctx.chat_type != "p2p":
         await send_text(ctx.open_id, "请私聊我发送「投票」，一人一票。")
         return
-    if not vote_open:
+    if not is_vote_open():
         await send_card(ctx.open_id, result_card("投票未开放", False, ["投票通道当前已关闭，请等待主持人开票。"]))
         return
     store = BaseStore(CFG.db_base_token)
@@ -94,8 +90,7 @@ async def handle_vote(ctx: MsgCtx) -> None:
 
 
 async def handle_vote_action(card_ctx: CardCtx) -> None:
-    global vote_open
-    if not vote_open:
+    if not is_vote_open():
         await send_text(card_ctx.open_id, "投票通道已关闭。")
         return
     store = BaseStore(CFG.db_base_token)
@@ -123,10 +118,9 @@ async def handle_vote_action(card_ctx: CardCtx) -> None:
 
 async def handle_votes_board(ctx: MsgCtx) -> None:
     """票榜：票数不公开，只展示排名不带数字（管理员可见票数）。"""
-    from ..sync import is_admin
     store = BaseStore(CFG.db_base_token)
     projects = sorted(list_projects(store), key=lambda x: -x["票数"])
-    show_votes = is_admin(ctx.open_id)
+    show_votes = ctx.is_admin
     lines = ["**当前票榜**", ""]
     for i, p in enumerate(projects, 1):
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
@@ -136,18 +130,8 @@ async def handle_votes_board(ctx: MsgCtx) -> None:
     await send_card(ctx.open_id, result_card("票榜", True, lines))
 
 
-async def handle_vote_toggle(ctx: MsgCtx) -> None:
-    from ..sync import is_admin
-    if not is_admin(ctx.open_id):
-        await send_text(ctx.open_id, "该指令仅限管理员使用。")
-        return
-    global vote_open
-    vote_open = ctx.text in ("开票",)
-    state = "开放" if vote_open else "关闭"
-    await send_text(ctx.open_id, f"投票通道已{state}。")
-
-
-REGISTRY.command("投票")(handle_vote)
-REGISTRY.command("票数", "票榜")(handle_votes_board)
-REGISTRY.command("开票", "关票")(handle_vote_toggle)
-REGISTRY.on_card("vote")(handle_vote_action)
+def register() -> None:
+    """注册用户侧投票指令和卡片回调。"""
+    REGISTRY.user_command("投票")(handle_vote)
+    REGISTRY.user_command("票数", "票榜")(handle_votes_board)
+    REGISTRY.on_card("vote", scope="user")(handle_vote_action)

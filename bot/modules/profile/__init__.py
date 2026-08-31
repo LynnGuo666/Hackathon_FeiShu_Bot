@@ -1,2 +1,1 @@
-"""个人中心模块。"""
-from . import profile  # noqa: F401
+"""个人中心领域模块，由 ``modules.user`` 统一装配。"""

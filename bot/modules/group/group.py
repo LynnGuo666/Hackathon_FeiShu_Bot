@@ -11,12 +11,8 @@ from __future__ import annotations
 import logging
 
 from ...core.base_store import BaseStore
-from ...core.card_kit import result_card
 from ...core.config import CFG
-from ...core.lark_client import (add_members, create_group, disband_group, list_member_ids,
-                                 send_card, send_text)
-from ...core.registry import REGISTRY, MsgCtx
-from ..sync import is_admin
+from ...core.lark_client import add_members, disband_group, list_member_ids
 from ..sync.sync import audit_status
 
 log = logging.getLogger(__name__)
@@ -130,22 +126,6 @@ def pull_user_into_groups(users: list[dict]) -> tuple[int, str | None]:
     return ok_total, err
 
 
-async def handle_backfill(ctx: MsgCtx) -> None:
-    if ctx.chat_type == "p2p" and not is_admin(ctx.open_id):
-        await send_text(ctx.open_id, "补拉指令仅限管理员使用。")
-        return
-    store = BaseStore(CFG.db_base_token)
-    targets = verified_users(store)
-    if not targets:
-        await send_text(ctx.open_id, "没有已验证的用户。")
-        return
-    ok, fail = pull_user_into_groups(targets)
-    await send_card(ctx.open_id, result_card("补拉完成", True, [
-        f"- 已验证用户：{len(targets)}", f"- 本次补拉入群人次：{ok}",
-        *( [f"- 失败：{fail}"] if fail else [] )]))
-
-
-@REGISTRY.job("自动补拉", CFG.backfill_interval_minutes)
 async def auto_backfill_job() -> None:
     """定时把所有已验证用户补进与其身份匹配的缺失群（含新增群），间隔为 0 时禁用。"""
     if CFG.backfill_interval_minutes <= 0:
@@ -179,51 +159,7 @@ async def promote_approved() -> int:
     return len(targets)
 
 
-@REGISTRY.job("审核通过补拉", CFG.backfill_interval_minutes)
 async def promote_approved_job() -> None:
     if CFG.backfill_interval_minutes <= 0:
         return
     await promote_approved()
-
-
-REGISTRY.command("补拉")(handle_backfill)
-
-
-async def handle_create_group(ctx: MsgCtx) -> None:
-    """「建群 群名 [面向身份]」（管理员）：机器人建外部群并登记进群配置表。
-
-    - 群主 = 发指令的管理员（外部群必须指定用户群主）；
-    - external=True，可拉外部成员，且建群机器人自动设为群管理员；
-    - 建好后自动写入群配置表（启用，面向身份默认「选手」），后续验证/补拉自动覆盖。
-    """
-    from ...core.base_store import BaseStore
-    if not is_admin(ctx.open_id):
-        await send_text(ctx.open_id, "建群指令仅限管理员使用。")
-        return
-    parts = ctx.text.split(maxsplit=2)
-    if len(parts) < 2 or not parts[1].strip():
-        await send_text(ctx.open_id, "用法：建群 <群名> [面向身份]\n"
-                        "面向身份可选：选手 / 组委会-导师 / 组委会-主办方 / 全部（默认选手，可逗号分隔多个）")
-        return
-    name = parts[1].strip()
-    audiences = [a.strip() for a in (parts[2].split(",") if len(parts) > 2 else []) if a.strip()] or ["选手"]
-
-    store = BaseStore(CFG.db_base_token)
-    try:
-        chat_id = create_group(name, owner_open_id=ctx.open_id, member_open_ids=[ctx.open_id],
-                               description=f"{name}（机器人创建）", external=True)
-    except Exception as e:
-        await send_card(ctx.open_id, result_card("建群失败", False, [str(e)]))
-        return
-    store.batch_create(CFG.tbl_group_config, [{
-        "群名": name, "chat_id": chat_id, "启用": True,
-        "面向身份": audiences, "备注": f"机器人创建，群主 open_id: {ctx.open_id}"}])
-    await send_card(ctx.open_id, result_card("建群成功", True, [
-        f"**{name}** 已创建并拉你入群（你是群主）。", "",
-        f"- chat_id：`{chat_id}`",
-        f"- 面向身份：{'、'.join(audiences)}",
-        "- 已登记进群配置表，验证/补拉会自动按身份拉人。",
-        "- 外部群可拉外部成员；如需拉人请把对方 open_id 提供给机器人或手动拉入。"]))
-
-
-REGISTRY.command("建群")(handle_create_group)

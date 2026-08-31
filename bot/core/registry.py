@@ -1,8 +1,11 @@
-"""插件注册器：功能模块通过注册命令 / 卡片回调 / 定时任务接入，核心不改。"""
+"""插件注册器：功能模块通过显式注册接入指令、回调和定时任务。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
+
+
+CommandScope = Literal["public", "user", "admin"]
 
 
 @dataclass
@@ -14,6 +17,7 @@ class MsgCtx:
     text: str             # 纯文本内容（已去 @）
     message_id: str
     raw: dict             # 原始事件
+    is_admin: bool = False  # 由事件路由层解析出的操作者权限
 
 
 @dataclass
@@ -26,6 +30,7 @@ class CardCtx:
     form_value: dict       # form 容器内全部控件值
     token: str             # 延迟更新卡片用
     raw: dict
+    is_admin: bool = False  # 由事件路由层解析出的操作者权限
 
 
 CommandHandler = Callable[[MsgCtx], Awaitable[None]]
@@ -41,6 +46,8 @@ class Registry:
     jobs: list[tuple[str, int, JobHandler]] = field(default_factory=list)  # (name, interval_minutes, fn)
     group_msg_hooks: list[GroupMsgHook] = field(default_factory=list)
     fallback: CommandHandler | None = None
+    command_scopes: dict[str, CommandScope] = field(default_factory=dict)
+    card_scopes: dict[str, CommandScope] = field(default_factory=dict)
 
     def on_group_message(self):
         """注册群消息钩子（每条群消息都会回调，参数 open_id/chat_id），用于活跃度等统计。"""
@@ -49,20 +56,49 @@ class Registry:
             return fn
         return deco
 
-    def command(self, *names: str):
-        """注册文本指令：@bot.command("验证", "授权")"""
+    def command(self, *names: str, scope: CommandScope = "public"):
+        """注册文本指令，并声明它属于公共、用户或管理员侧。"""
+        if scope not in ("public", "user", "admin"):
+            raise ValueError(f"未知指令作用域: {scope}")
+
         def deco(fn: CommandHandler):
             for n in names:
-                self.commands[n.strip()] = fn
+                name = n.strip()
+                self.commands[name] = fn
+                self.command_scopes[name] = scope
             return fn
         return deco
 
-    def on_card(self, action_value: str):
-        """注册卡片回调（按按钮 action_value 路由）。"""
+    def user_command(self, *names: str):
+        """注册用户侧指令。管理员也可以使用用户侧指令。"""
+        return self.command(*names, scope="user")
+
+    def admin_command(self, *names: str):
+        """注册管理员侧指令。事件路由层会统一执行权限校验。"""
+        return self.command(*names, scope="admin")
+
+    def public_command(self, *names: str):
+        """注册无需身份权限的公共指令。"""
+        return self.command(*names, scope="public")
+
+    def allows_command(self, name: str, is_admin: bool) -> bool:
+        """判断操作者是否可以执行指令。未声明的旧指令按公共处理。"""
+        return self.command_scopes.get(name, "public") != "admin" or is_admin
+
+    def on_card(self, action_value: str, scope: CommandScope = "public"):
+        """注册卡片回调，并声明它属于公共、用户或管理员侧。"""
+        if scope not in ("public", "user", "admin"):
+            raise ValueError(f"未知卡片作用域: {scope}")
+
         def deco(fn: CardHandler):
             self.card_actions[action_value] = fn
+            self.card_scopes[action_value] = scope
             return fn
         return deco
+
+    def allows_card(self, action_value: str, is_admin: bool) -> bool:
+        """判断操作者是否可以执行卡片回调。"""
+        return self.card_scopes.get(action_value, "public") != "admin" or is_admin
 
     def job(self, name: str, interval_minutes: int):
         """注册定时任务。"""

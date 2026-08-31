@@ -1,1 +1,1 @@
-from . import auth  # noqa: F401  导入即注册指令
+"""验证领域模块，由 ``modules.user`` 统一装配。"""

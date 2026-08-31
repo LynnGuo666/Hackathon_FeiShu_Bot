@@ -1,1 +1,1 @@
-from . import score  # noqa: F401  骨架：尚未注册指令
+"""积分领域模块，由 ``modules.user`` 统一装配。"""

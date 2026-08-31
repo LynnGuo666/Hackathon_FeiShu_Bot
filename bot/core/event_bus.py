@@ -6,6 +6,7 @@ import logging
 import time
 
 from .config import CFG
+from .permissions import is_admin
 from .registry import REGISTRY, CardCtx, MsgCtx
 
 log = logging.getLogger(__name__)
@@ -84,8 +85,15 @@ async def handle_message(event: dict) -> None:
     chat_type = msg.get("chat_type", "")
     if msg.get("message_type") != "text":
         return
-    ctx = MsgCtx(open_id=open_id, chat_id=msg.get("chat_id", ""), chat_type=chat_type,
-                 text=_text_of(msg.get("content", "")), message_id=msg.get("message_id", ""), raw=event)
+    ctx = MsgCtx(
+        open_id=open_id,
+        chat_id=msg.get("chat_id", ""),
+        chat_type=chat_type,
+        text=_text_of(msg.get("content", "")),
+        message_id=msg.get("message_id", ""),
+        raw=event,
+        is_admin=is_admin(open_id),
+    )
 
     # 记录发送者身份（含外部用户 open_id，便于排查/拉群）
     if _is_external(event):
@@ -102,6 +110,14 @@ async def handle_message(event: dict) -> None:
     handler = REGISTRY.commands.get(ctx.text)
     if handler is None:
         handler = REGISTRY.fallback
+    elif not REGISTRY.allows_command(ctx.text, ctx.is_admin):
+        # 权限判断集中在路由层，业务 handler 无需重复实现管理员校验。
+        from .lark_client import send_text
+        try:
+            await send_text(ctx.open_id, "该指令仅限管理员使用。")
+        except Exception:
+            log.exception("发送管理员权限提示失败: %s", ctx.text)
+        handler = None
     if handler is not None:
         try:
             await handler(ctx)
@@ -130,6 +146,7 @@ async def handle_card_action(event: dict) -> None:
         form_value=action.get("form_value") or {},
         token=event.get("token", ""),
         raw=event,
+        is_admin=is_admin(operator.get("open_id", "")),
     )
     if not ctx.open_id:
         log.warning("卡片回调缺少 operator.open_id，跳过: %s", list(event.keys()))
@@ -141,6 +158,13 @@ async def handle_card_action(event: dict) -> None:
         return
     handler = REGISTRY.card_actions.get(ctx.action_value)
     if handler is not None:
+        if not REGISTRY.allows_card(ctx.action_value, ctx.is_admin):
+            from .lark_client import send_text
+            try:
+                await send_text(ctx.open_id, "该操作仅限管理员使用。")
+            except Exception:
+                log.exception("发送管理员卡片权限提示失败: %s", ctx.action_value)
+            return
         try:
             await handler(ctx)
         except Exception:
@@ -154,12 +178,15 @@ async def handle_card_action(event: dict) -> None:
     cmd = _GUIDE_BUTTON_COMMANDS.get(ctx.action_value)
     if cmd:
         handler = REGISTRY.commands.get(cmd)
+        if handler is not None and not REGISTRY.allows_command(cmd, ctx.is_admin):
+            handler = None
         if handler is not None:
             try:
                 # 按钮上下文转消息上下文（chat_type 用回调所在会话类型）
                 msg_ctx = MsgCtx(open_id=ctx.open_id, chat_id=ctx.chat_id,
                                  chat_type="p2p" if not ctx.chat_id else "p2p",
-                                 text=cmd, message_id=ctx.message_id, raw=ctx.raw)
+                                 text=cmd, message_id=ctx.message_id, raw=ctx.raw,
+                                 is_admin=ctx.is_admin)
                 await handler(msg_ctx)
             except Exception:
                 log.exception("处理卡片快捷按钮出错: %s", ctx.action_value)

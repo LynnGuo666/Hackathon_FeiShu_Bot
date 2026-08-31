@@ -153,4 +153,6 @@ async def handle_profile(ctx: MsgCtx) -> None:
     await send_card(ctx.open_id, result_card("个人中心", True, lines))
 
 
-REGISTRY.command("个人中心", "我的")(handle_profile)
+def register() -> None:
+    """注册用户侧个人中心指令。"""
+    REGISTRY.user_command("个人中心", "我的")(handle_profile)

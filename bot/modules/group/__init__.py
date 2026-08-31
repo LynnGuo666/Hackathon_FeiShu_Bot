@@ -1,1 +1,1 @@
-from . import group  # noqa: F401  导入即注册指令
+"""群管理领域服务，由 ``modules.admin`` 和用户验证流程调用。"""
