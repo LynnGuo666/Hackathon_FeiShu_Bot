@@ -2,8 +2,8 @@
 
 新版要点：
 - 顶层 schema="2.0"，元素放 body.elements；仅支持 update_multi=true（共享卡片）。
-- 按钮交互用 behaviors: [{type: "click", default: {type: "callback", value: {...}}}]。
-- 表单提交按钮用 form_action_type: "form_submit"，回调里表单值在 action.form_value。
+- 按钮交互用 behaviors: [{type: "callback", value: {...}}]（没有 behaviors 不会触发回调）。
+- 表单提交按钮用 form_action_type: "submit"，同样需配 behaviors，回调里表单值在 action.form_value。
 - 回调事件仍是 card.action.trigger，value 取 action.value（与旧版一致）。
 - 需要飞书客户端 7.20+，低版本只显示标题。
 """

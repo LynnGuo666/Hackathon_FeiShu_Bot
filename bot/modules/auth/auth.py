@@ -214,8 +214,8 @@ def verify_form_card() -> dict:
                  {"tag": "button", "name": "submit",
                   "text": {"tag": "plain_text", "content": "提交验证"},
                   "type": "primary", "size": "medium",
-                  "form_action_type": "submit", "action_type": "form_submit",
-                  "value": {"action": "verify_submit"}},
+                  "form_action_type": "submit",
+                  "behaviors": [{"type": "callback", "value": {"action": "verify_submit"}}]},
              ]},
         ]},
     }
@@ -244,8 +244,8 @@ def org_verify_form_card(auto_phone: str = "") -> dict:
                  {"tag": "button", "name": "submit",
                   "text": {"tag": "plain_text", "content": "提交验证"},
                   "type": "primary", "size": "medium",
-                  "form_action_type": "submit", "action_type": "form_submit",
-                  "value": {"action": "org_verify_submit"}},
+                  "form_action_type": "submit",
+                  "behaviors": [{"type": "callback", "value": {"action": "org_verify_submit"}}]},
              ]},
         ]},
     }
