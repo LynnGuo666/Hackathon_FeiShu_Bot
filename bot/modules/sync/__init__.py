@@ -32,6 +32,29 @@ def _fetch_collaborator_admins() -> set[str]:
     return {c.user_id for c in (resp.data.collaborators or []) if c.user_id}
 
 
+def test_recipient() -> str:
+    """测试消息收件人：优先 .env TEST_OPEN_ID，否则取协作者里的 Lynn（administrator），再否则 owner。"""
+    if CFG.test_open_id:
+        return CFG.test_open_id
+    try:
+        from lark_oapi.api.application.v6 import GetApplicationCollaboratorsRequest
+
+        from ...core.lark_client import client
+        resp = client().application.v6.application_collaborators.get(
+            GetApplicationCollaboratorsRequest.builder().app_id(CFG.app_id).user_id_type("open_id").build())
+        if resp.success():
+            collabs = [(c.type, c.user_id) for c in (resp.data.collaborators or []) if c.user_id]
+            for want in ("administrator", "owner"):
+                for t, uid in collabs:
+                    if t == want:
+                        return uid
+            if collabs:
+                return collabs[0][1]
+    except Exception:
+        pass
+    return ""
+
+
 def refresh_admins() -> None:
     """刷新管理员名单（协作者 API + .env 兜底合并）。"""
     global _collaborators_failed

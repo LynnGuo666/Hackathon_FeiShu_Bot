@@ -74,7 +74,11 @@ cp .env.example .env          # 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
 | `同步` | 手动触发一次报名表同步 |
 | `补拉` | 把所有已验证选手补进缺失的群（管理员；以群成员实时数据为准，新增群自动覆盖） |
 | `管理员` | 查看当前管理员名单与来源 |
-| 其他任意消息 | 回复帮助卡片 |
+| 其他任意消息 | 回复帮助卡片（含快捷按钮：验证 / 投票 / 活跃度 / 票榜，点按钮即触发） |
+
+## 卡片
+
+全部使用**新版卡片 JSON 2.0**（`schema: "2.0"`）：帮助卡片带快捷操作按钮（behaviors callback），验证表单用 form 容器 + 提交按钮（`form_action_type: "submit"`），投票卡片每个项目一个回调按钮。回调事件仍为 `card.action.trigger`，按钮值在 `action.value`、表单值在 `action.form_value`。要求飞书客户端 7.20+（低版本只显示标题）。
 
 ## 管理员识别
 

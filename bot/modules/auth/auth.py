@@ -125,25 +125,31 @@ async def handle_verify(ctx: MsgCtx) -> None:
 
 
 def verify_form_card() -> dict:
+    """授权表单卡片（JSON 2.0）：手机号 + vx号 双因子，form_submit 一次回调全部表单值。"""
     return {
-        "config": {"wide_screen_mode": True},
+        "schema": "2.0",
+        "config": {"update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "选手授权验证"}, "template": "blue"},
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content":
-                "无法自动读取你的手机号（企业外用户），请填写**报名表**中登记的信息完成验证："}},
+        "body": {"elements": [
+            {"tag": "markdown", "content":
+                "无法自动读取你的手机号（企业外用户），请填写**报名表**中登记的信息完成验证："},
             {"tag": "form", "name": "verify_form",
              "elements": [
                  {"tag": "input", "name": "phone",
                   "placeholder": {"tag": "plain_text", "content": "报名手机号"},
-                  "label": {"tag": "plain_text", "content": "手机号"}},
+                  "label": {"tag": "plain_text", "content": "手机号"},
+                  "max_length": 11},
                  {"tag": "input", "name": "vx",
                   "placeholder": {"tag": "plain_text", "content": "报名时填写的 vx 号（或其后4位）"},
-                  "label": {"tag": "plain_text", "content": "vx号"}},
-                 {"tag": "button", "action_type": "form_submit",
-                  "name": "submit", "text": {"tag": "plain_text", "content": "提交验证"},
-                  "type": "primary", "value": {"action": "verify_submit"}},
+                  "label": {"tag": "plain_text", "content": "vx号"},
+                  "max_length": 50},
+                 {"tag": "button", "name": "submit",
+                  "text": {"tag": "plain_text", "content": "提交验证"},
+                  "type": "primary", "size": "medium",
+                  "form_action_type": "submit", "action_type": "form_submit",
+                  "value": {"action": "verify_submit"}},
              ]},
-        ],
+        ]},
     }
 
 

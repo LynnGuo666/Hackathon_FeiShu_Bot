@@ -114,9 +114,25 @@ async def handle_card_action(event: dict) -> None:
     if _is_external(event) and not CFG.allow_external_users:
         return
     handler = REGISTRY.card_actions.get(ctx.action_value)
-    if handler is None:
+    if handler is not None:
+        try:
+            await handler(ctx)
+        except Exception:
+            log.exception("处理卡片回调出错: %s", ctx.action_value)
         return
-    try:
-        await handler(ctx)
-    except Exception:
-        log.exception("处理卡片回调出错: %s", ctx.action_value)
+    # 帮助卡片快捷按钮：把按钮 action 映射为对应文本指令复用现有处理器
+    _GUIDE_BUTTON_COMMANDS = {
+        "verify": "验证", "vote": "投票", "activity": "活跃", "votes_board": "票数",
+    }
+    cmd = _GUIDE_BUTTON_COMMANDS.get(ctx.action_value)
+    if cmd:
+        handler = REGISTRY.commands.get(cmd)
+        if handler is not None:
+            try:
+                # 按钮上下文转消息上下文（chat_type 用回调所在会话类型）
+                msg_ctx = MsgCtx(open_id=ctx.open_id, chat_id=ctx.chat_id,
+                                 chat_type="p2p" if not ctx.chat_id else "p2p",
+                                 text=cmd, message_id=ctx.message_id, raw=ctx.raw)
+                await handler(msg_ctx)
+            except Exception:
+                log.exception("处理卡片快捷按钮出错: %s", ctx.action_value)

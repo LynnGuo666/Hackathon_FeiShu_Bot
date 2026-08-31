@@ -1,34 +1,69 @@
-"""卡片模板工具（Card 1.0 简单结构，够用且稳定）。"""
+"""卡片模板工具（卡片 JSON 2.0，schema="2.0"）。
+
+新版要点：
+- 顶层 schema="2.0"，元素放 body.elements；仅支持 update_multi=true（共享卡片）。
+- 按钮交互用 behaviors: [{type: "click", default: {type: "callback", value: {...}}}]。
+- 表单提交按钮用 form_action_type: "form_submit"，回调里表单值在 action.form_value。
+- 回调事件仍是 card.action.trigger，value 取 action.value（与旧版一致）。
+- 需要飞书客户端 7.20+，低版本只显示标题。
+"""
 from __future__ import annotations
 
 
 def result_card(title: str, ok: bool, lines: list[str]) -> dict:
-    theme = "success" if ok else "danger"
-    elements = [{
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": "\n".join(lines)},
-    }]
+    theme = "green" if ok else "red"
     return {
-        "config": {"wide_screen_mode": True},
+        "schema": "2.0",
+        "config": {"update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": title}, "template": theme},
-        "elements": elements,
+        "body": {"elements": [{
+            "tag": "markdown",
+            "content": "\n".join(lines),
+        }]},
     }
 
 
 def guide_card() -> dict:
+    """帮助卡片：指令说明 + 一键操作按钮。"""
+    def btn(text: str, action: str, style: str = "default") -> dict:
+        return {"tag": "button", "text": {"tag": "plain_text", "content": text},
+                "type": style, "size": "medium",
+                "behaviors": [{"type": "callback", "value": {"action": action}}]}
+
     return {
-        "config": {"wide_screen_mode": True},
+        "schema": "2.0",
+        "config": {"update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "未央黑客松选手服务"}, "template": "blue"},
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content":
-                "**可用指令**\n"
-                "- `验证` —— 校验飞书账号手机号是否在已审核选手名单中，通过后自动拉入交流群\n"
-                "- `活跃` —— 查看群发言活跃度排行\n"
+        "body": {"elements": [
+            {"tag": "markdown", "content":
+                "**快捷操作**（点按钮即可，无需打字）"},
+            {"tag": "column_set", "flex_mode": "bisect", "columns": [
+                {"tag": "column", "width": "weighted", "weight": 1, "elements": [
+                    btn("✅ 验证身份", "verify", "primary")],
+                 "horizontal_align": "left"},
+                {"tag": "column", "width": "weighted", "weight": 1, "elements": [
+                    btn("🗳️ 去投票", "vote")],
+                 "horizontal_align": "left"},
+            ]},
+            {"tag": "column_set", "flex_mode": "bisect", "columns": [
+                {"tag": "column", "width": "weighted", "weight": 1, "elements": [
+                    btn("🔥 活跃度排行", "activity")],
+                 "horizontal_align": "left"},
+                {"tag": "column", "width": "weighted", "weight": 1, "elements": [
+                    btn("📊 查看票榜", "votes_board")],
+                 "horizontal_align": "left"},
+            ]},
+            {"tag": "hr"},
+            {"tag": "markdown", "content":
+                "**全部指令**\n"
+                "- `验证` —— 绑定飞书账号与报名信息，审核通过后自动拉入交流群\n"
+                "- `活跃` —— 群发言活跃度排行（加「今天」看当日）\n"
                 "- `投票` —— 决赛投票（一人一票）\n"
                 "- `票数` —— 查看当前票榜\n"
-                "- `同步` —— 手动触发一次报名表同步（管理员）\n"
-                "- `补拉` —— 把已验证未入群的选手批量拉群（管理员）\n"
+                "- `同步` —— 手动触发报名表同步（管理员）\n"
+                "- `补拉` —— 把已验证选手补进缺失的群（管理员）\n"
                 "- `开票` / `关票` —— 开关投票通道（管理员）\n"
-                "- `帮助` —— 查看本说明"}},
-        ],
+                "- `管理员` —— 查看管理员名单\n"
+                "- `帮助` —— 查看本说明"},
+        ]},
     }

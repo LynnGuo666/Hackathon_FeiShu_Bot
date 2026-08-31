@@ -40,6 +40,8 @@ class Config:
     allow_external_users: bool = field(default_factory=lambda: _env("ALLOW_EXTERNAL_USERS", "0") == "1")
     # 本租户 tenant_key（启动时自动获取，用于识别外部用户）
     own_tenant_key: str = field(default_factory=lambda: _env("OWN_TENANT_KEY"))
+    # 测试收件人：实发测试卡片/消息的目标 open_id
+    test_open_id: str = field(default_factory=lambda: _env("TEST_OPEN_ID"))
 
     @property
     def has_app_credentials(self) -> bool:

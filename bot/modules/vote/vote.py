@@ -56,23 +56,25 @@ def _find_contestant(store: BaseStore, open_id: str) -> dict | None:
 
 
 def project_list_card() -> dict:
+    """项目列表卡片（JSON 2.0）：每个项目一个投票按钮（behaviors callback）。"""
     store = BaseStore(CFG.db_base_token)
     projects = list_projects(store)
     elements = []
     if not projects:
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "项目表暂无项目。"}})
+        elements.append({"tag": "markdown", "content": "项目表暂无项目。"})
     for p in projects:
-        elements.append({"tag": "div", "text": {"tag": "lark_md",
-                        "content": f"**{p['项目ID']} {p['项目名称']}**（当前 {p['票数']} 票）"}})
-        elements.append({"tag": "action", "actions": [{
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": f"投给 {p['项目名称']}"},
-            "type": "primary",
-            "value": {"action": "vote", "project_record_id": p["record_id"]},
-        }]})
-    return {"config": {"wide_screen_mode": True},
+        elements.append({"tag": "markdown",
+                         "content": f"**{p['项目ID']} {p['项目名称']}**（当前 {p['票数']} 票）"})
+        elements.append({"tag": "button",
+                         "text": {"tag": "plain_text", "content": f"投给 {p['项目名称']}"},
+                         "type": "primary", "size": "medium",
+                         "behaviors": [{"type": "callback",
+                                        "value": {"action": "vote",
+                                                  "project_record_id": p["record_id"]}}]})
+    return {"schema": "2.0",
+            "config": {"update_multi": True},
             "header": {"title": {"tag": "plain_text", "content": "决赛投票"}, "template": "violet"},
-            "elements": elements}
+            "body": {"elements": elements}}
 
 
 async def handle_vote(ctx: MsgCtx) -> None:
