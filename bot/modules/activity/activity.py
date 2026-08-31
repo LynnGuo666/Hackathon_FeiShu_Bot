@@ -52,6 +52,13 @@ def _find_by_open_id(open_id: str) -> dict | None:
     return None
 
 
+def _link_ids(cell) -> list[str]:
+    """link 字段读回形态是 [{"id": "rec..."}]，取出目标 record_id 列表。"""
+    if not isinstance(cell, list):
+        return []
+    return [x["id"] for x in cell if isinstance(x, dict) and x.get("id")]
+
+
 def flush() -> int:
     """把内存缓冲落库：活跃度表按天 upsert + 选手表发言数回写。返回落库人数。"""
     if not _pending:
@@ -65,9 +72,8 @@ def flush() -> int:
         f = r.get("fields") or {}
         if str(f.get("日期") or "") != today:
             continue
-        for link in (f.get("选手") or []):
-            if isinstance(link, dict) and link.get("record_id"):
-                existing[link["record_id"]] = r
+        for rid in _link_ids(f.get("选手")):
+            existing[rid] = r
 
     a_create, a_update, c_update = [], [], []
     for open_id, e in _pending.items():
@@ -108,9 +114,8 @@ def leaderboard(top_n: int = 10, daily: bool = False) -> list[tuple[str, int]]:
             f = r.get("fields") or {}
             if str(f.get("日期") or "") != today:
                 continue
-            for link in (f.get("选手") or []):
-                if isinstance(link, dict) and link.get("record_id"):
-                    rows.append((name_by_rid.get(link["record_id"], "?"), int(f.get("发言数") or 0)))
+            for rid in _link_ids(f.get("选手")):
+                rows.append((name_by_rid.get(rid, "?"), int(f.get("发言数") or 0)))
     else:
         for r in store.list_records(CFG.tbl_contestants):
             f = r.get("fields") or {}

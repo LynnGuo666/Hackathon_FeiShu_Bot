@@ -46,9 +46,29 @@ def _columnar_to_records(data: dict) -> list[dict]:
 class BaseStore:
     """按表名读写的通用封装。所有分页/分批在此处处理。"""
 
+    _table_id_cache: dict[str, str] = {}  # base_token -> {表名: table_id}
+
     def __init__(self, base_token: str):
         self.base_token = base_token
         self.backend = "sdk" if (CFG.has_app_credentials and _env_backend() == "sdk") else "cli"
+
+    def resolve_table_id(self, table: str) -> str:
+        """SDK 后端只认 table_id；中文表名先解析（带缓存）。CLI 后端两者都支持。"""
+        if table.startswith("tbl") or self.backend == "cli":
+            return table
+        cache = BaseStore._table_id_cache.setdefault(self.base_token, {})
+        if table not in cache:
+            from lark_oapi.api.bitable.v1 import ListAppTableRequest
+
+            resp = _sdk_client().bitable.v1.app_table.list(
+                ListAppTableRequest.builder().app_token(self.base_token).page_size(100).build())
+            if not resp.success():
+                raise RuntimeError(f"解析表名失败: {resp.code} {resp.msg}")
+            for t in (resp.data.items or []):
+                cache[t.name] = t.table_id
+            if table not in cache:
+                raise RuntimeError(f"Base 中不存在表: {table}")
+        return cache[table]
 
     # ---------- 查询 ----------
     def list_records(self, table: str) -> list[dict]:
@@ -106,7 +126,7 @@ class BaseStore:
         records, page_token = [], ""
         while True:
             b = (ListAppTableRecordRequest.builder()
-                 .app_token(self.base_token).table_id(table).page_size(500)
+                 .app_token(self.base_token).table_id(self.resolve_table_id(table)).page_size(500)
                  .user_id_type("open_id"))
             if page_token:
                 b = b.page_token(page_token)
@@ -126,7 +146,7 @@ class BaseStore:
         client = _sdk_client()
         body = ReqAppTableRecordForCreate.builder()
         body.records([AppTableRecordForCreate.builder().fields(r).build() for r in rows])
-        req = BatchCreateAppTableRecordRequest.builder().app_token(self.base_token).table_id(table).request_body(body.build())
+        req = BatchCreateAppTableRecordRequest.builder().app_token(self.base_token).table_id(self.resolve_table_id(table)).request_body(body.build())
         resp = client.bitable.v1.app_table_record.batch_create(req.build())
         if not resp.success():
             raise RuntimeError(f"SDK 批量新建失败: {resp.code} {resp.msg}")
@@ -139,7 +159,7 @@ class BaseStore:
         client = _sdk_client()
         body = ReqAppTableRecordForUpdate.builder()
         body.records([AppTableRecordForUpdate.builder().record_id(it["record_id"]).fields(it["fields"]).build() for it in items])
-        req = BatchUpdateAppTableRecordRequest.builder().app_token(self.base_token).table_id(table).request_body(body.build())
+        req = BatchUpdateAppTableRecordRequest.builder().app_token(self.base_token).table_id(self.resolve_table_id(table)).request_body(body.build())
         resp = client.bitable.v1.app_table_record.batch_update(req.build())
         if not resp.success():
             raise RuntimeError(f"SDK 批量更新失败: {resp.code} {resp.msg}")

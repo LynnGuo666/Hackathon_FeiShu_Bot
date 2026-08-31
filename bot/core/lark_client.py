@@ -58,7 +58,7 @@ def get_user_phone(open_id: str) -> str | None:
     from lark_oapi.api.contact.v3 import GetUserRequest
 
     req = GetUserRequest.builder().user_id(open_id).user_id_type("open_id").build()
-    resp = client().contact.v1.user.get(req)
+    resp = client().contact.v3.user.get(req)
     if not resp.success():
         raise RuntimeError(f"读取用户信息失败: {resp.code} {resp.msg}（可能缺手机号权限或不在应用可见范围）")
     return getattr(resp.data.user, "mobile", None)
@@ -78,9 +78,11 @@ def resolve_open_ids_by_phones(phones: list[str]) -> dict[str, str]:
         resp = client().contact.v3.user.batch_get_id(req)
         if not resp.success():
             raise RuntimeError(f"手机号查询失败: {resp.code} {resp.msg}")
-        for mobile, u in (resp.data.user_list or []):
-            if u and getattr(u, "user_id", None):
-                out[mobile.lstrip("+")] = u.user_id
+        for u in (resp.data.user_list or []):
+            mobile = getattr(u, "mobile", None) or ""
+            uid = getattr(u, "user_id", None)
+            if mobile and uid:
+                out[mobile.lstrip("+")] = uid
     return out
 
 

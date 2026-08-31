@@ -32,17 +32,19 @@ def list_projects(store: BaseStore) -> list[dict]:
     return out
 
 
+def _link_ids(cell) -> list[str]:
+    """link 字段读回形态是 [{"id": "rec..."}]，取出目标 record_id 列表。"""
+    if not isinstance(cell, list):
+        return []
+    return [x["id"] for x in cell if isinstance(x, dict) and x.get("id")]
+
+
 def _voted_projects(store: BaseStore, contestant_record_id: str) -> set[str]:
     voted = set()
     for r in store.list_records(CFG.tbl_vote):
         f = r.get("fields") or {}
-        voters = f.get("投票人") or []
-        ids = {v.get("record_id") for v in voters if isinstance(v, dict)}
-        if contestant_record_id in ids:
-            projects = f.get("项目") or []
-            for p in projects:
-                if isinstance(p, dict):
-                    voted.add(p.get("record_id"))
+        if contestant_record_id in _link_ids(f.get("投票人")):
+            voted.update(_link_ids(f.get("项目")))
     return voted
 
 
