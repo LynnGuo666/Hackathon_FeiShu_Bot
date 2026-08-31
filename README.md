@@ -24,6 +24,7 @@ bot/
 scripts/
   init_base.py       全量同步脚本
   backfill.py        手动补拉脚本
+  describe_fields.py 给 Base 所有表字段写描述注释（幂等；Link 字段 API 不支持，见脚本内文档）
 ```
 
 扩展新功能：在 `bot/modules/` 下新建目录，用 `@REGISTRY.command("指令名")`、`@REGISTRY.on_card(...)`、`@REGISTRY.job(...)` 注册即可，无需改核心代码。
@@ -55,7 +56,7 @@ cp .env.example .env          # 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
 ## 飞书开发者后台配置清单
 
 1. 创建企业自建应用，启用「机器人」能力。
-2. 开通权限：`im:message:send_as_bot`、`im:message:readonly`、`im:chat:read`、`im:chat.members:write_only`、`im:chat.members:read`、`bitable:app`、`contact:user.base:readonly`、**获取用户手机号**（`contact:user.employee_id:readonly` 所属的手机号读取权限）。
+2. 开通权限：`im:message:send_as_bot`、`im:message:readonly`、`im:chat:read`、`im:chat.members:write_only`、`im:chat.members:read`、`bitable:app`、`contact:user.base:readonly`、**获取用户手机号**（`contact:user.employee_id:readonly` 所属的手机号读取权限）、`application:application:self_manage`（管理员识别，或 `admin:app.info:readonly`）。
 3. 事件与回调：订阅方式选择「**使用长连接接收事件**」，订阅 `im.message.receive_v1`；如需卡片交互，开启回调配置。
 4. 把「活动报名」Base 和「选手数据库」Base 添加应用为**协作者**（可编辑）。
 5. 应用可用范围加入需要验证的选手。
@@ -65,14 +66,25 @@ cp .env.example .env          # 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
 
 | 指令 | 说明 |
 |---|---|
-| `验证` / `授权` | 私聊机器人，读取飞书账号手机号与选手库比对，审核通过即绑定并拉群 |
+| `验证` / `授权` | 私聊机器人，读取飞书账号手机号（外部用户填表单：手机号+vx号）与选手库比对，绑定 open_id。**验证=绑定身份，与审核解耦**：审核未通过也会绑定成功，审核通过后自动拉群 |
 | `活跃` / `活跃度` | 查看群发言活跃度排行（机器人自动监控群发言累计） |
 | `投票` | 决赛投票：机器人回复项目列表卡片，点按钮投票，一人一票 |
 | `票数` / `票榜` | 查看当前票榜 |
 | `开票` / `关票` | 开关投票通道（管理员） |
 | `同步` | 手动触发一次报名表同步 |
 | `补拉` | 把所有已验证选手补进缺失的群（管理员；以群成员实时数据为准，新增群自动覆盖） |
+| `管理员` | 查看当前管理员名单与来源 |
 | 其他任意消息 | 回复帮助卡片 |
+
+## 管理员识别
+
+管理员 = **飞书开发者后台的应用协作者**（owner / administrator 等）。机器人启动时调「获取应用协作者」API 拉取名单，之后每 10 分钟自动刷新；需要权限 `application:application:self_manage` 或 `admin:app.info:readonly`（任一）。`.env` 的 `ADMIN_OPEN_IDS` 作为兜底（API 失败时仍可用）。
+
+## 验证与审核的关系
+
+- **验证**：确认「这个飞书账号 = 报名表里的某个人」，成功即绑定 open_id、标记已验证。
+- **审核状态**：只由报名表同步刷新（审核状态取最优：任一队伍通过即通过）。
+- **拉群**：验证成功且审核通过 → 立即拉群；验证成功但未审核 → 等审核通过后由「审核通过补拉」定时任务（每 30 分钟）自动拉群，无需重新验证。
 
 ## 活跃度监控
 
