@@ -125,6 +125,30 @@ def resolve_open_ids_by_phones(phones: list[str]) -> dict[str, str]:
     return out
 
 
+def list_member_ids(chat_id: str) -> set[str]:
+    """拉取群全部成员 open_id（自动翻页）。"""
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import GetChatMembersRequest
+
+    out: set[str] = set()
+    page_token = ""
+    while True:
+        b = (GetChatMembersRequest.builder()
+             .chat_id(chat_id).member_id_type("open_id").page_size(100))
+        if page_token:
+            b = b.page_token(page_token)
+        resp = client().im.v1.chat_members.get(b.build())
+        if not resp.success():
+            raise RuntimeError(f"读取群成员失败: {resp.code} {resp.msg}")
+        for m in (resp.data.items or []):
+            if m.member_id:
+                out.add(m.member_id)
+        if not resp.data.has_more:
+            break
+        page_token = resp.data.page_token or ""
+    return out
+
+
 def add_members(chat_id: str, open_ids: list[str]) -> tuple[int, str | None]:
     """把 open_id 列表拉入群，返回 (成功数, 错误信息)。"""
     import lark_oapi as lark

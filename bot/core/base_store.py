@@ -94,13 +94,22 @@ class BaseStore:
 
     # ---------- 写入 ----------
     def batch_create(self, table: str, rows: list[dict]) -> list[dict]:
-        """批量新建，单批 200，返回新建记录（含 record_id）。rows 是字段映射列表。"""
+        """批量新建，单批 200，返回新建记录（含 record_id）。
+
+        rows 是字段映射列表（如 [{"姓名": "x"}]）；兼容误传的 [{"fields": {...}}] 形态（自动解包）。
+        """
+        norm = []
+        for r in rows:
+            if set(r.keys()) == {"fields"} and isinstance(r["fields"], dict):
+                r = r["fields"]
+            norm.append(r)
+        rows = norm
         created = []
         for i in range(0, len(rows), 200):
             chunk = rows[i:i + 200]
             if self.backend == "cli":
                 data = _cli("base", "+record-batch-create", "--base-token", self.base_token, "--table-id", table,
-                            "--json", json.dumps({"create_records": chunk}, ensure_ascii=False))
+                            "--json", json.dumps({"create_records": [{"fields": c} for c in chunk]}, ensure_ascii=False))
                 recs = data.get("records") or data.get("items") or []
                 created.extend(recs if recs and isinstance(recs[0], dict) and "record_id" in recs[0] else [])
             else:

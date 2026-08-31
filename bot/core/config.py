@@ -33,6 +33,8 @@ class Config:
     tbl_vote: str = field(default_factory=lambda: _env("TBL_VOTE", "投票表"))
 
     sync_interval_minutes: int = field(default_factory=lambda: int(_env("SYNC_INTERVAL_MINUTES", "10") or 10))
+    # 自动补拉间隔（分钟）：把已验证选手补进缺失的群（含新增群）；0 = 禁用
+    backfill_interval_minutes: int = field(default_factory=lambda: int(_env("BACKFILL_INTERVAL_MINUTES", "30") or 30))
     admin_open_ids: list[str] = field(default_factory=lambda: [x for x in _env("ADMIN_OPEN_IDS").split(",") if x])
     # 是否允许企业外用户使用机器人（external 用户不在通讯录，无法读手机号，验证必然失败）
     allow_external_users: bool = field(default_factory=lambda: _env("ALLOW_EXTERNAL_USERS", "0") == "1")

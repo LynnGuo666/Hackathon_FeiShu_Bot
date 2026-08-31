@@ -185,7 +185,6 @@ def run_sync(store: BaseStore | None = None, reg_store: BaseStore | None = None)
             max_seq += 1
             row["选手ID"] = f"WY01-{max_seq:04d}"
             row["验证状态"] = "未验证"
-            row["入群状态"] = "未入群"
             to_create.append(row)
 
     if to_create:
