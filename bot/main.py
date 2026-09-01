@@ -1,8 +1,9 @@
 """机器人入口。
 
 启动内容：
+- 插件装配（PluginManager：依赖排序、启停、热插拔）
 - WebSocket 长连接接收消息事件与卡片回调（无需公网回调 URL）
-- APScheduler 执行各模块注册的定时任务（如报名表自动同步、活跃度落库）
+- APScheduler 执行各插件注册的定时任务（如报名表自动同步、活跃度落库）
 
 用法：python -m bot.main
 """
@@ -12,22 +13,26 @@ import asyncio
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from .core.card_kit import guide_card
 from .core.event_bus import handle_card_action, handle_message
 from .core.lark_client import send_card
 from .core.permissions import refresh_admins
+from .core.plugin import PluginManager
 from .core.registry import REGISTRY, MsgCtx
 
 # 管理员和用户侧分别装配，领域模块只提供服务或注册自身能力。
-from .modules.admin import register as register_admin_modules
-from .modules.user import register as register_user_modules
-
-register_admin_modules()
-register_user_modules()
+from .modules.admin import AdminJobsPlugin, AdminPlugin
+from .modules.group.group import GroupPlugin
+from .modules.sync.sync import SyncPlugin
+from .modules.user import (ActivityPlugin, AuthPlugin, ProfilePlugin,
+                           ScorePlugin, VotePlugin)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("bot")
+
+PLUGIN_MANAGER = PluginManager()
 
 
 @REGISTRY.on_fallback
@@ -53,15 +58,14 @@ def _run_async(coro):
 
     SDK 回调若超时未返回，飞书会认为投递失败并重推事件，导致重复处理；
     因此这里只提交任务到后台循环，不做 .result() 同步等待。
+    后台循环未就绪时丢弃任务并记错（启动期事件不应到达；不落 asyncio.run，
+    避免把 asyncio 锁绑定到临时循环）。
     """
-    try:
-        loop = _BACKGROUND_LOOP
-        if loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(coro, loop)
-            return
-    except RuntimeError:
-        pass
-    asyncio.run(coro)
+    loop = _BACKGROUND_LOOP
+    if loop is not None and loop.is_running():
+        asyncio.run_coroutine_threadsafe(coro, loop)
+        return
+    log.error("后台事件循环未就绪，丢弃事件协程: %r", coro)
 
 
 _BACKGROUND_LOOP: asyncio.AbstractEventLoop | None = None
@@ -71,6 +75,9 @@ def _start_background_loop():
     """独立事件循环线程：所有事件处理协程跑在这里，互不阻塞 ws 心跳。"""
     global _BACKGROUND_LOOP
     loop = asyncio.new_event_loop()
+    # to_thread 默认线程池按 CPU 数分配（本机 14）；限流等待会占住线程，
+    # 万级并发下 14 线程会被 sleep 耗尽，显式扩到 32。
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=32, thread_name_prefix="bot-io"))
     _BACKGROUND_LOOP = loop
     threading.Thread(target=loop.run_forever, daemon=True, name="bot-event-loop").start()
 
@@ -93,11 +100,12 @@ def build_dispatcher():
     return handler
 
 
-def start_scheduler() -> None:
+def start_scheduler():
     """定时任务统一跑在 bot 后台事件循环线程（B4）。
 
     AsyncIOScheduler 绑定该循环：job 协程与事件处理同线程，共享状态无需跨线程加锁；
-    阻塞 IO 由仓库层 to_thread 解决。
+    阻塞 IO 由仓库层 to_thread 解决。调度器引用交给 PluginManager，
+    插件 disable/enable 时同步摘除/恢复其 job。
     """
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -106,6 +114,8 @@ def start_scheduler() -> None:
         scheduler.add_job(fn, "interval", minutes=interval, id=name, name=name)
         log.info("注册定时任务 %s：每 %d 分钟", name, interval)
     scheduler.start()
+    PLUGIN_MANAGER.attach_scheduler(scheduler)
+    return scheduler
 
 
 def fetch_tenant_key() -> None:
@@ -130,6 +140,23 @@ def fetch_tenant_key() -> None:
         log.warning("获取 tenant_key 失败（外部用户拦截将不生效）: %s", e)
 
 
+def setup_plugins() -> None:
+    """登记并启用全部插件（依赖序）。新增功能插件在此追加一行即可。"""
+    PLUGIN_MANAGER.register(
+        SyncPlugin(),
+        GroupPlugin(),
+        VotePlugin(),
+        ScorePlugin(),
+        ActivityPlugin(),
+        AuthPlugin(),
+        ProfilePlugin(),
+        AdminJobsPlugin(),
+        AdminPlugin(),  # 依赖 sync/group/vote，装配时自动排到最后
+    )
+    enabled = PLUGIN_MANAGER.setup_all()
+    log.info("插件装配完成: %s", ", ".join(enabled))
+
+
 def main() -> None:
     import lark_oapi as lark
     from lark_oapi.ws import Client as WsClient
@@ -143,6 +170,7 @@ def main() -> None:
     fetch_tenant_key()
     refresh_admins()
     _start_background_loop()
+    setup_plugins()
     start_scheduler()
 
     ws = WsClient(CFG.app_id, CFG.app_secret,

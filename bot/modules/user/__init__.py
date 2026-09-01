@@ -1,23 +1,9 @@
-"""普通用户侧能力装配入口。"""
-from ..activity import activity
-from ..auth import auth
-from ..profile import profile
-from ..score import score
-from ..vote import vote
+"""普通用户侧能力装配入口（插件导出）。"""
+from ..activity.activity import ActivityPlugin
+from ..auth.auth import AuthPlugin
+from ..profile.profile import ProfilePlugin
+from ..score.score import ScorePlugin
+from ..vote.vote import VotePlugin
 
 
-_registered = False
-
-
-def register() -> None:
-    """注册全部用户指令、卡片回调和用户相关后台钩子。"""
-    global _registered
-    if _registered:
-        return
-    for module in (auth, profile, score, activity, vote):
-        module.register()
-    _registered = True
-
-
-__all__ = ["register"]
-
+__all__ = ["AuthPlugin", "ProfilePlugin", "ScorePlugin", "ActivityPlugin", "VotePlugin"]

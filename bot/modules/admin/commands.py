@@ -13,10 +13,11 @@ from ...core.card_kit import result_card
 from ...core.lark_client import create_group, send_card, send_text
 from ...core.models import GroupConfig
 from ...core.permissions import admins_status_line
+from ...core.plugin import Plugin
 from ...core.registry import REGISTRY, MsgCtx
-from ...core.service import SVC
+from ...core.service import reload_data, SVC
 from ..auth.binding_codes import generate_binding_codes
-from ..group.group import pull_user_into_groups, verified_users
+from ..group.group import verified_users
 from ..sync.sync import run_sync, sync_in_progress
 from ..vote.state import set_vote_open
 
@@ -37,6 +38,7 @@ async def handle_admins(ctx: MsgCtx) -> None:
 
 
 async def handle_backfill(ctx: MsgCtx) -> None:
+    from ..group.group import pull_user_into_groups
     targets = await verified_users()
     if not targets:
         await send_text(ctx.open_id, "没有已验证的用户。")
@@ -47,6 +49,17 @@ async def handle_backfill(ctx: MsgCtx) -> None:
         f"- 本次补拉入群人次：{ok}",
         *([f"- 失败：{fail}"] if fail else []),
     ]))
+
+
+async def handle_reload(ctx: MsgCtx) -> None:
+    """强制全量刷新内存镜像（Base 手工改数据后的兜底）。"""
+    try:
+        stats = await reload_data()
+    except Exception as exc:
+        await send_card(ctx.open_id, result_card("重载失败", False, [str(exc)]))
+        return
+    await send_card(ctx.open_id, result_card("数据已重载", True, [
+        f"- {key}：**{value}**" for key, value in stats.items()]))
 
 
 async def handle_create_group(ctx: MsgCtx) -> None:
@@ -118,14 +131,19 @@ async def handle_vote_toggle(ctx: MsgCtx) -> None:
     await send_text(ctx.open_id, f"投票通道已{state}。")
 
 
-def register() -> None:
-    """注册管理员侧指令。"""
-    REGISTRY.admin_command("同步")(handle_sync)
-    REGISTRY.admin_command("管理员")(handle_admins)
-    REGISTRY.admin_command("补拉")(handle_backfill)
-    REGISTRY.admin_command("建群")(handle_create_group)
-    REGISTRY.admin_command("生成绑定码")(handle_generate_codes)
-    REGISTRY.admin_command("开票", "关票")(handle_vote_toggle)
+class AdminPlugin(Plugin):
+    name = "admin"
+    dependencies = ("sync", "group", "vote")
+
+    def setup(self) -> None:
+        """注册管理员侧指令。"""
+        REGISTRY.admin_command("同步", plugin=self.name)(handle_sync)
+        REGISTRY.admin_command("管理员", plugin=self.name)(handle_admins)
+        REGISTRY.admin_command("补拉", plugin=self.name)(handle_backfill)
+        REGISTRY.admin_command("重载数据", plugin=self.name)(handle_reload)
+        REGISTRY.admin_command("建群", plugin=self.name)(handle_create_group)
+        REGISTRY.admin_command("生成绑定码", plugin=self.name)(handle_generate_codes)
+        REGISTRY.admin_command("开票", "关票", plugin=self.name)(handle_vote_toggle)
 
 
-__all__ = ["register"]
+__all__ = ["register", "AdminPlugin"]

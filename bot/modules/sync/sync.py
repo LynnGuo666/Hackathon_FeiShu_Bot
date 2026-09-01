@@ -17,6 +17,8 @@ import logging
 import re
 
 from ...core.models import Registration
+from ...core.plugin import Plugin
+from ...core.registry import REGISTRY
 from ...core.service import SVC
 
 log = logging.getLogger(__name__)
@@ -137,6 +139,16 @@ async def run_sync() -> dict:
         return await _run_sync_impl()
 
 
+async def sync_job() -> None:
+    """定时同步任务：上一轮未结束时跳过本轮。"""
+    if sync_in_progress():
+        log.info("上一轮同步仍在进行，跳过本轮定时同步")
+        return
+    await run_sync()
+    from ..sync.audience import sync_group_audience_options
+    await sync_group_audience_options()
+
+
 async def _run_sync_impl() -> dict:
     registrations = await SVC.registrations.list_all()
     people = merge_contestants(registrations)
@@ -253,3 +265,13 @@ def _count_invalid(registrations: list[Registration]) -> int:
             if raw and not is_valid_phone(raw):
                 n += 1
     return n
+
+
+class SyncPlugin(Plugin):
+    """报名表同步：只注册定时任务；手动「同步」指令由 admin 插件注册。"""
+    name = "sync"
+    dependencies = ()
+
+    def setup(self) -> None:
+        from ...core.config import CFG
+        REGISTRY.job("报名表自动同步", CFG.sync_interval_minutes, plugin=self.name)(sync_job)

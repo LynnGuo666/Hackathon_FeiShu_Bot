@@ -13,6 +13,7 @@ import logging
 from ...core.card_kit import result_card
 from ...core.lark_client import send_card
 from ...core.models import Contestant, Organizer
+from ...core.plugin import Plugin
 from ...core.registry import REGISTRY, MsgCtx
 from ...core.service import SVC
 
@@ -99,6 +100,10 @@ async def handle_profile(ctx: MsgCtx) -> None:
     await send_card(ctx.open_id, result_card("个人中心", True, lines))
 
 
-def register() -> None:
-    """注册用户侧个人中心指令。"""
-    REGISTRY.user_command("个人中心", "我的")(handle_profile)
+class ProfilePlugin(Plugin):
+    name = "profile"
+    dependencies = ()
+
+    def setup(self) -> None:
+        """注册用户侧个人中心指令。"""
+        REGISTRY.user_command("个人中心", "我的", plugin=self.name)(handle_profile)

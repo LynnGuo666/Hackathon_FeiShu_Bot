@@ -53,7 +53,7 @@ class ProjectRepo(Protocol):
     async def list_all(self) -> list[Project]: ...
     async def get(self, record_id: str) -> Project | None: ...
     async def incr_votes(self, record_id: str, delta: int = 1) -> None:
-        """票数增减（实现方需保证读改写原子性，如进程内锁）。"""
+        """兼容保留：票数权威值由投票表记录 + Base 公式字段聚合，实现方可为 no-op。"""
 
 
 @runtime_checkable
@@ -73,9 +73,8 @@ class ScoreRepo(Protocol):
 @runtime_checkable
 class ActivityRepo(Protocol):
     async def today_rows(self, date: str) -> list[ActivityEntry]: ...
-    async def upsert_daily(self, contestant_record_id: str, date: str, delta: int) -> None: ...
-    async def flush_totals(self, items: list[tuple[str, int]]) -> None:
-        """把累计发言数回写选手表：[(contestant_record_id, total)]。"""
+    async def upsert_daily(self, contestant_record_id: str, date: str, delta: int) -> None:
+        """按天 upsert 活跃度（write-behind，由 flush 任务批量调用）。"""
 
 
 @runtime_checkable

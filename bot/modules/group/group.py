@@ -10,10 +10,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 
 from ...core.lark_client import add_members, list_member_ids
 from ...core.models import Contestant, GroupConfig, Organizer, PullLog
+from ...core.plugin import Plugin
+from ...core.registry import REGISTRY
 from ...core.service import SVC
 
 log = logging.getLogger(__name__)
@@ -21,6 +25,25 @@ log = logging.getLogger(__name__)
 # 身份常量
 ID_CONTESTANT = "选手"
 ID_ALL = "全部"
+
+# ---------- 群成员列表 TTL 缓存：验证风暴/补拉时避免逐人逐群翻页拉成员 ----------
+_member_cache: dict[str, tuple[float, set[str]]] = {}
+_MEMBER_TTL = 60.0
+_member_cache_lock = threading.Lock()
+
+
+async def _cached_member_ids(chat_id: str) -> set[str]:
+    import time
+
+    now = time.monotonic()
+    with _member_cache_lock:
+        hit = _member_cache.get(chat_id)
+        if hit and now - hit[0] < _MEMBER_TTL:
+            return hit[1]
+    ids = await asyncio.to_thread(list_member_ids, chat_id)
+    with _member_cache_lock:
+        _member_cache[chat_id] = (now, ids)
+    return ids
 
 
 async def enabled_chats() -> list[GroupConfig]:
@@ -70,8 +93,6 @@ async def pull_user_into_groups(users: list[dict]) -> tuple[int, str | None]:
 
     users: [{open_id, 选手ID, record_id, identities}]；返回 (成功拉入人次, 失败信息)。
     """
-    import asyncio
-
     chats = await enabled_chats()
     ok_total, err = 0, None
     log_rows: list[PullLog] = []
@@ -80,7 +101,7 @@ async def pull_user_into_groups(users: list[dict]) -> tuple[int, str | None]:
         if not targets:
             continue
         try:
-            member_ids = await asyncio.to_thread(list_member_ids, chat.chat_id)
+            member_ids = await _cached_member_ids(chat.chat_id)
         except Exception as e:
             err = f"{chat.name}: {e}"
             log.warning("读取群成员失败，跳过该群: %s", err)
@@ -142,3 +163,18 @@ async def promote_approved_job() -> None:
     if CFG.backfill_interval_minutes <= 0:
         return
     await promote_approved()
+
+
+class GroupPlugin(Plugin):
+    """拉群与补拉：只注册定时任务；验证/绑定成功后由补拉任务批量拉人。"""
+    name = "group"
+    dependencies = ()
+
+    def setup(self) -> None:
+        REGISTRY.job("自动补拉", _backfill_interval(), plugin=self.name)(auto_backfill_job)
+        REGISTRY.job("审核通过补拉", _backfill_interval(), plugin=self.name)(promote_approved_job)
+
+
+def _backfill_interval() -> int:
+    from ...core.config import CFG
+    return CFG.backfill_interval_minutes

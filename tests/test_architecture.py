@@ -92,6 +92,10 @@ class FakeVoteRepos:
         if self.vote_delay:
             await asyncio.sleep(self.vote_delay)
         self.votes.append((voter_record_id, project_record_id))
+        # 模拟镜像 apply_vote_add：写成功后项目票数即时 +1（权威值由公式字段聚合）
+        for p in self.projects:
+            if p.record_id == project_record_id:
+                p.votes += 1
 
 
 class FakeProjectRepo:
@@ -105,6 +109,8 @@ class FakeProjectRepo:
         return next((p for p in self.projects if p.record_id == record_id), None)
 
     async def incr_votes(self, record_id, delta=1):
+        # 新架构：票数权威值由投票表 + 公式字段聚合，incr_votes 为兼容 no-op；
+        # 镜像即时票数由 FeishuVoteRepo.add 内部累加，这里模拟同样行为。
         for p in self.projects:
             if p.record_id == record_id:
                 p.votes += delta
@@ -230,7 +236,7 @@ class EntityMappingTests(unittest.TestCase):
 
     def test_contestant_mapping(self):
         from bot.adapters.feishu import field_names as F
-        from bot.adapters.feishu.repos import _to_contestant
+        from bot.adapters.feishu.mirror import _to_contestant
 
         rec = {"record_id": "rec1", "fields": {
             F.C_NO: "WY01-0001", F.C_NAME: [{"text": "张三"}], F.C_PHONE: "13800138000",
@@ -317,7 +323,7 @@ class CardExpiryTests(unittest.TestCase):
 
 
 class FakeScoreRepos:
-    """积分读改写竞态测试的假仓库：update 人为延迟放大竞态窗口。"""
+    """积分写流水测试的假仓库：add 模拟镜像累加总分（新架构无读改写回表）。"""
 
     def __init__(self, contestant):
         self.contestant = contestant
@@ -334,6 +340,8 @@ class FakeScoreRepos:
 
     async def add(self, contestant_record_id, delta, reason, total_after):
         self.entries.append((delta, total_after))
+        # 模拟镜像 apply_score_add：流水写成功后总分即时累加（权威值由公式字段聚合）
+        self.contestant.score += delta
 
 
 class ScoreConcurrencyTests(unittest.TestCase):

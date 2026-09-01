@@ -20,6 +20,24 @@ _CARD_DEDUP_WINDOW = 120  # 卡片操作 2 分钟内视为重复（正常点击�
 # 去重表容量上限：超出时一次性淘汰到 80%（避免超限后每次插入都全表排序）
 _DEDUP_MAX_ENTRIES = 20000
 _DEDUP_TRIM_TO = 16000
+# 过期清扫节流：万级并发下每事件全量迭代清理是 O(n²)，改为按时间/插入数批量清扫
+_SWEEP_INTERVAL = 30.0
+_SWEEP_EVERY_N_INSERTS = 5000
+_sweep_state = {"ts": 0.0, "inserts": 0}
+
+
+def _maybe_sweep(now: float) -> None:
+    """节流触发：距上次清扫超 30s 或累计插入超 5000 时批量清理两张去重表。"""
+    if (now - _sweep_state["ts"] < _SWEEP_INTERVAL
+            and _sweep_state["inserts"] < _SWEEP_EVERY_N_INSERTS):
+        return
+    _sweep_state["ts"] = now
+    _sweep_state["inserts"] = 0
+    for table, window in ((_seen_events, _DEDUP_WINDOW),
+                          (_seen_card_actions, _CARD_DEDUP_WINDOW)):
+        stale = [k for k, ts in table.items() if now - ts > window]
+        for k in stale:
+            table.pop(k, None)
 
 
 def _dedup(event: dict) -> bool:
@@ -28,13 +46,12 @@ def _dedup(event: dict) -> bool:
     if not eid:
         return False
     now = time.time()
-    # 顺手清理过期项
-    for k in [k for k, ts in _seen_events.items() if now - ts > _DEDUP_WINDOW]:
-        _seen_events.pop(k, None)
+    _maybe_sweep(now)
     if eid in _seen_events:
         log.info("重复事件已跳过: %s", eid)
         return True
     _seen_events[eid] = now
+    _sweep_state["inserts"] += 1
     _evict_oldest(_seen_events)
     return False
 
@@ -52,8 +69,7 @@ def _card_dedup(ctx) -> bool:
     去重键含完整按钮参数（如 project_record_id）：同卡片上点不同项目按钮不算重复。
     """
     now = time.time()
-    for k in [k for k, ts in _seen_card_actions.items() if now - ts > _CARD_DEDUP_WINDOW]:
-        _seen_card_actions.pop(k, None)
+    _maybe_sweep(now)
     value = (ctx.raw.get("action") or {}).get("value")
     try:
         value_key = json.dumps(value, sort_keys=True, ensure_ascii=False)
@@ -64,6 +80,7 @@ def _card_dedup(ctx) -> bool:
         log.info("重复卡片回调已跳过: %s", key)
         return True
     _seen_card_actions[key] = now
+    _sweep_state["inserts"] += 1
     _evict_oldest(_seen_card_actions)
     return False
 

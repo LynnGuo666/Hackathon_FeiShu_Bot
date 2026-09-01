@@ -1,15 +1,12 @@
-"""验证授权模块。
+"""验证授权插件。
 
 双通道验证，先选手后组委会：
 - 选手：内部用户（同租户）私聊发「验证」→ 自动读取飞书账号手机号比对（无感）；
   外部用户（跨租户，黑客松选手大多是这类）→ 授权卡片填「手机号 + vx号」双因子。
-- 组委会：选手表未命中时查组委会表，双因子为「手机号 + 姓名」
-  （内部用户自动读手机号 + 需提供姓名；外部用户表单填手机号 + 姓名）。
-  通过后按「组委会-{身份}」拉入对应群。
+- 组委会：选手表未命中时查组委会表，双因子为「手机号 + 姓名」。
 
-通过后绑定 open_id、更新验证状态，并触发拉群。
-
-存储一律经 SVC 仓库接口（core.service），不直接接触飞书字段。
+通过后绑定 open_id、更新验证状态；拉群改为异步批量（回执提示稍后自动拉入），
+由补拉任务统一执行，避免验证风暴下逐人拉群的 API 洪峰。
 """
 from __future__ import annotations
 
@@ -20,9 +17,9 @@ import time
 from ...core.card_kit import result_card
 from ...core.lark_client import edit_card, get_user_phone, send_card, send_text
 from ...core.models import Contestant, Organizer
+from ...core.plugin import Plugin
 from ...core.registry import REGISTRY, CardCtx, MsgCtx
 from ...core.service import SVC
-from ..group.group import ID_CONTESTANT, pull_user_into_groups
 from ..sync.sync import is_valid_phone, normalize_phone
 
 log = logging.getLogger(__name__)
@@ -47,7 +44,6 @@ async def _reply_bound_contestant(open_id: str, c: Contestant) -> None:
 
 
 # ---------- 验证卡片过期：15 分钟未操作自动更新为超时提示 ----------
-# 过期标记与提交消费都在同一事件循环线程，无 await 的段不会交错，无需加锁。
 _pending_cards: dict[str, dict] = {}   # message_id -> {"sent_at": ts, "expired": bool}
 _CARD_TIMEOUT = 15 * 60
 _CARD_PURGE_AFTER = _CARD_TIMEOUT + 30 * 60  # 过期后再保留 30 分钟用于拦截迟到提交
@@ -119,26 +115,22 @@ def _name_matches(name_real: str, name_input: str) -> bool:
 
 
 async def _approve_contestant(c: Contestant, open_id: str) -> tuple[int, str | None, bool]:
-    """绑定 open_id 并标记已验证；审核通过则拉群。返回 (拉群成功数, 失败信息, 是否已拉群)。"""
+    """绑定 open_id 并标记已验证。返回 (0, None, 是否审核通过)。
+
+    拉群不再逐人即时执行（验证风暴下 API 洪峰），统一由补拉任务批量处理。
+    """
     await SVC.contestants.update(c.record_id, open_id=open_id, verify_status="已验证")
-    if not c.approved:
-        return 0, None, False
-    ok, fail = await pull_user_into_groups(
-        [{"open_id": open_id, "选手ID": c.contestant_no,
-          "record_id": c.record_id, "identities": [ID_CONTESTANT]}])
-    return ok, fail, True
+    return 0, None, c.approved
 
 
 async def _approve_organizer(o: Organizer, open_id: str) -> tuple[int, str | None]:
-    """绑定 open_id、标记已验证，按「组委会-{身份}」拉群。返回 (成功数, 失败信息)。"""
+    """绑定 open_id、标记已验证。拉群统一由补拉任务批量处理。"""
     await SVC.organizers.update(o.record_id, open_id=open_id, verify_status="已验证")
-    return await pull_user_into_groups(
-        [{"open_id": open_id, "选手ID": o.name,
-          "record_id": o.record_id, "identities": [o.committee_identity]}])
+    return 0, None
 
 
 async def _approve_org_locked(o: Organizer, open_id: str) -> tuple[bool, int, str | None]:
-    """记录粒度锁内绑定组委会身份，返回 (是否绑定成功, 拉群成功数, 失败信息)。
+    """记录粒度锁内绑定组委会身份，返回 (是否绑定成功, 0, None)。
 
     「绑定码绑定」与「表单验证」走不同的入口锁，仅靠手机号锁无法互斥，
     因此在记录锁内重读占用状态：已被其他账号绑定时返回 (False, 0, None)。
@@ -149,22 +141,22 @@ async def _approve_org_locked(o: Organizer, open_id: str) -> tuple[bool, int, st
                       if x.record_id == o.record_id), None)
         if fresh is None or (fresh.open_id and fresh.open_id != open_id):
             return False, 0, None
-        ok, fail = await _approve_organizer(fresh, open_id)
-        return True, ok, fail
+        await _approve_organizer(fresh, open_id)
+        return True, 0, None
 
 
-def _reply_result_lines(c: Contestant, ok: int, fail: str | None, pulled: bool) -> list[str]:
-    if pulled:
+def _reply_result_lines(c: Contestant, pulled: bool) -> list[str]:
+    if c.approved:
         return [f"欢迎 **{c.name}**（{c.contestant_no}）！验证成功 ✅", "",
-                f"- 已拉入 {ok} 个交流群" + (f"（{fail}）" if fail else "")]
+                "- 稍后将自动拉你进入交流群，请留意群邀请。"]
     return [f"**{c.name}**（{c.contestant_no}），身份验证成功 ✅", "",
             f"- 你的报名当前状态为「{c.audit_status or '未审核'}」，审核通过后会自动拉你进入交流群。",
             "- 无需重新验证，届时机器人会自动处理。"]
 
 
-def _reply_org_lines(o: Organizer, ok: int, fail: str | None) -> list[str]:
+def _reply_org_lines(o: Organizer) -> list[str]:
     return [f"欢迎 **{o.name}**（{o.committee_identity}）！验证成功 ✅", "",
-            f"- 已拉入 {ok} 个组委会群" + (f"（{fail}）" if fail else "")]
+            "- 稍后将自动拉你进入组委会群，请留意群邀请。"]
 
 
 async def handle_verify(ctx: MsgCtx) -> None:
@@ -199,9 +191,9 @@ async def handle_verify(ctx: MsgCtx) -> None:
                         "如需换绑请联系管理员。"]))
                     return
                 # 验证 = 绑定身份，与审核解耦：未审核通过也绑定，审核通过后由自动补拉任务拉群
-                ok, fail, pulled = await _approve_contestant(rec, ctx.open_id)
+                await _approve_contestant(rec, ctx.open_id)
                 await send_card(ctx.open_id, result_card("验证成功", True,
-                                                         _reply_result_lines(rec, ok, fail, pulled)))
+                                                         _reply_result_lines(rec, pulled=rec.approved)))
                 return
             # 选手表未命中 -> 组委会表（手机号命中即内部组委会，姓名在表单/自动流程里都要求提供）
             org = await _find_org_by_phone(phone)
@@ -324,12 +316,12 @@ async def handle_verify_submit(card_ctx: CardCtx) -> None:
                 if not _name_matches(org.name, str(form.get("vx") or "")):
                     await reply(False, "验证未通过", ["组委会名单命中手机号，但姓名不一致；请填写组委会登记的姓名。"])
                     return
-                ok_bind, ok, fail = await _approve_org_locked(org, card_ctx.open_id)
+                ok_bind, _ok, _fail = await _approve_org_locked(org, card_ctx.open_id)
                 if not ok_bind:
                     await reply(False, "验证未通过", [
                         f"手机号 `{phone}` 对应的组委会记录已绑定其他飞书账号，如需换绑请联系管理员。"])
                     return
-                await reply(True, "验证成功", _reply_org_lines(org, ok, fail))
+                await reply(True, "验证成功", _reply_org_lines(org))
                 return
             await reply(False, "验证未通过", ["该手机号不在选手名单中。如果你已报名，请确认报名表中的手机号，或联系管理员。"])
             return
@@ -341,8 +333,8 @@ async def handle_verify_submit(card_ctx: CardCtx) -> None:
             await reply(False, "验证未通过", ["vx号与报名信息不一致，请检查（可填报名时登记的 vx 号或其后 4 位）。"])
             return
         # 验证 = 绑定身份，与审核解耦：未审核通过也绑定，审核通过后由自动补拉任务拉群
-        ok, fail, pulled = await _approve_contestant(rec, card_ctx.open_id)
-        await reply(True, "验证成功", _reply_result_lines(rec, ok, fail, pulled))
+        await _approve_contestant(rec, card_ctx.open_id)
+        await reply(True, "验证成功", _reply_result_lines(rec, pulled=rec.approved))
 
 
 async def handle_org_verify_submit(card_ctx: CardCtx) -> None:
@@ -383,21 +375,16 @@ async def handle_org_verify_submit(card_ctx: CardCtx) -> None:
         if not _name_matches(org.name, name):
             await reply(False, "验证未通过", ["姓名与组委会登记信息不一致，请检查。"])
             return
-        ok_bind, ok, fail = await _approve_org_locked(org, card_ctx.open_id)
+        ok_bind, _ok, _fail = await _approve_org_locked(org, card_ctx.open_id)
         if not ok_bind:
             await reply(False, "验证未通过", [
                 f"手机号 `{phone}` 对应的组委会记录已绑定其他飞书账号，如需换绑请联系管理员。"])
             return
-        await reply(True, "验证成功", _reply_org_lines(org, ok, fail))
+        await reply(True, "验证成功", _reply_org_lines(org))
 
 
 async def handle_bind(ctx: MsgCtx) -> None:
-    """「绑定 <码>」：已验证用户用组委会绑定码额外绑定组委会身份（如以选手身份报名的导师）。
-
-    - 未验证用户提示先验证；
-    - 绑定码命中组委会记录且该记录未绑定其他 open_id 时：绑定 open_id、标记已验证，
-      按「组委会-{身份}」拉群；选手身份保持不变（双重身份）。
-    """
+    """「绑定 <码>」：已验证用户用组委会绑定码额外绑定组委会身份（如以选手身份报名的导师）。"""
     parts = ctx.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         await send_text(ctx.open_id, "用法：绑定 <绑定码>（绑定码由组委会创建名单时生成，可用「生成绑定码」指令批量补齐）")
@@ -422,21 +409,24 @@ async def handle_bind(ctx: MsgCtx) -> None:
         return
 
     # 记录锁内重读占用状态并绑定：与并发的组委会表单验证互斥
-    ok_bind, ok, fail = await _approve_org_locked(org, ctx.open_id)
+    ok_bind, _ok, _fail = await _approve_org_locked(org, ctx.open_id)
     if not ok_bind:
         await send_card(ctx.open_id, result_card("绑定失败", False, [
             f"绑定码 `{code}`（{org.name}）已被其他账号绑定，如需换绑请联系管理员。"]))
         return
     await send_card(ctx.open_id, result_card("绑定成功", True, [
         f"已为你额外绑定组委会身份 **{org.committee_identity}**（{org.name}）✅", "",
-        f"- 已拉入 {ok} 个组委会群" + (f"（{fail}）" if fail else ""),
+        "- 稍后将自动拉你进入组委会群。",
         "- 你的选手身份不受影响。"]))
 
 
-def register() -> None:
-    """注册用户侧验证、绑定指令和表单回调。"""
-    REGISTRY.user_command("验证", "授权", "验证身份")(handle_verify)
-    REGISTRY.on_card("verify_submit", scope="user")(handle_verify_submit)
-    REGISTRY.on_card("org_verify_submit", scope="user")(handle_org_verify_submit)
-    REGISTRY.user_command("绑定")(handle_bind)
-    REGISTRY.job("验证卡片过期检查", 1)(expire_cards_job)
+class AuthPlugin(Plugin):
+    name = "auth"
+    dependencies = ()
+
+    def setup(self) -> None:
+        REGISTRY.user_command("验证", "授权", "验证身份", plugin=self.name)(handle_verify)
+        REGISTRY.on_card("verify_submit", scope="user", plugin=self.name)(handle_verify_submit)
+        REGISTRY.on_card("org_verify_submit", scope="user", plugin=self.name)(handle_org_verify_submit)
+        REGISTRY.user_command("绑定", plugin=self.name)(handle_bind)
+        REGISTRY.job("验证卡片过期检查", 1, plugin=self.name)(expire_cards_job)

@@ -1,10 +1,11 @@
-"""投票模块：决赛投票环节。
+"""投票插件：决赛投票环节。
 
 - 选手私聊发「投票」→ 机器人回项目列表卡片（每个项目一个投票按钮）
-- 点按钮 → card.action.trigger 回调 → 校验（已验证选手、未投过票）→ 写投票表 + 项目表票数 +1
+- 点按钮 → card.action.trigger 回调 → 校验（已验证选手、未投过票）→ 写投票表
 - 「票数」指令：查看当前票榜；「开票/关票」：管理员开关投票
 
-存储一律经 SVC 仓库接口（core.service），不直接接触飞书字段。
+票数权威值 = 投票表记录数（Base 公式/查找引用字段服务端聚合）；
+镜像内项目票数同步 +1 仅供即时展示。写路径每次投票恰好 1 次 API 调用。
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import logging
 from ...core.card_kit import result_card
 from ...core.lark_client import send_card, send_text
 from ...core.models import Contestant, Project
+from ...core.plugin import Plugin
 from ...core.registry import REGISTRY, CardCtx, MsgCtx
 from ...core.service import SVC
 from .state import is_vote_open
@@ -79,7 +81,7 @@ async def handle_vote_action(card_ctx: CardCtx) -> None:
     project_rid = card_ctx.raw.get("action", {}).get("value", {}).get("project_record_id", "")
     if not project_rid:
         return
-    # 同一用户串行：查已投 -> 写投票 -> 票数+1（B3）
+    # 同一用户串行：查已投 -> 写投票（B3）。写穿透 1 次 API，票数由公式字段聚合。
     lock = await _voter_lock(card_ctx.open_id)
     async with lock:
         voted = await SVC.votes.voted_project_ids(me.record_id)
@@ -87,7 +89,6 @@ async def handle_vote_action(card_ctx: CardCtx) -> None:
             await send_text(card_ctx.open_id, "你已经投过票了，一人一票哦。")
             return
         await SVC.votes.add(me.record_id, project_rid)
-        await SVC.projects.incr_votes(project_rid, 1)
     project = await SVC.projects.get(project_rid)
     name = project.name if project else ""
     await send_text(card_ctx.open_id, f"投票成功 ✅ 你把票投给了「{name}」。")
@@ -106,11 +107,14 @@ async def handle_votes_board(ctx: MsgCtx) -> None:
     await send_card(ctx.open_id, result_card("票榜", True, lines))
 
 
-def register() -> None:
-    """注册用户侧投票指令和卡片回调。"""
-    REGISTRY.user_command("投票")(handle_vote)
-    REGISTRY.user_command("票数", "票榜")(handle_votes_board)
-    REGISTRY.on_card("vote", scope="user")(handle_vote_action)
+class VotePlugin(Plugin):
+    name = "vote"
+    dependencies = ()
+
+    def setup(self) -> None:
+        REGISTRY.user_command("投票", plugin=self.name)(handle_vote)
+        REGISTRY.user_command("票数", "票榜", plugin=self.name)(handle_votes_board)
+        REGISTRY.on_card("vote", scope="user", plugin=self.name)(handle_vote_action)
 
 
 async def send_card_result(open_id: str, title: str, ok: bool, lines: list[str]) -> None:

@@ -1,45 +1,31 @@
-"""积分模块：积分表写流水 + 选手表「积分」总分同步更新。
+"""积分插件：积分表写流水，总分由 Base 公式字段（SUM 流水）服务端聚合。
 
-- add_score(contestant_record_id, delta, reason)：写一条流水并把选手表总分 ±delta；
-- 「查分」指令：查看自己的积分与最近流水；管理员可「加分 @不适用」暂不支持，直接改表即可。
-
-存储一律经 SVC 仓库接口（core.service），不直接接触飞书字段。
+- add_score(contestant_record_id, delta, reason)：写一条流水；镜像内总分同步累加
+  供即时展示，不再读改写回选手表（消灭并发覆盖问题，无需选手粒度锁）。
+- 「查分」指令：查看自己的积分与最近流水。
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from ...core.card_kit import result_card
 from ...core.lark_client import send_card
+from ...core.plugin import Plugin
 from ...core.registry import REGISTRY, MsgCtx
 from ...core.service import SVC
 
 log = logging.getLogger(__name__)
 
-# 同一选手的积分读改写串行化（B3）：防止并发加分互相覆盖总分
-_score_locks: dict[str, asyncio.Lock] = {}
-_score_locks_guard = asyncio.Lock()
-
-
-async def _score_lock(contestant_record_id: str) -> asyncio.Lock:
-    async with _score_locks_guard:
-        return _score_locks.setdefault(contestant_record_id, asyncio.Lock())
-
 
 async def add_score(contestant_record_id: str, delta: int, reason: str) -> int:
-    """写积分流水并更新选手表总分，返回变动后总分。
+    """写积分流水并返回变动后总分（镜像即时值；权威值由公式字段聚合）。
 
-    读改写用选手粒度锁串行化（B3），防止并发加分互相覆盖总分。
+    写路径单条流水 1 次 API；总分 = 流水 SUM，无读改写竞态，无需加锁。
     """
-    contestants = SVC.contestants
-    lock = await _score_lock(contestant_record_id)
-    async with lock:
-        me = await contestants.get(contestant_record_id)
-        total = me.score if me else 0
-        new_total = total + delta
-        await SVC.scores.add(contestant_record_id, delta, reason, new_total)
-        await contestants.update(contestant_record_id, score=new_total)
+    me = await SVC.contestants.get(contestant_record_id)
+    total = me.score if me else 0
+    new_total = total + delta
+    await SVC.scores.add(contestant_record_id, delta, reason, new_total)
     return new_total
 
 
@@ -58,6 +44,9 @@ async def handle_my_score(ctx: MsgCtx) -> None:
     await send_card(ctx.open_id, result_card("我的积分", True, lines))
 
 
-def register() -> None:
-    """注册用户侧积分查询指令。"""
-    REGISTRY.user_command("查分", "积分")(handle_my_score)
+class ScorePlugin(Plugin):
+    name = "score"
+    dependencies = ()
+
+    def setup(self) -> None:
+        REGISTRY.user_command("查分", "积分", plugin=self.name)(handle_my_score)
