@@ -1,7 +1,12 @@
-"""飞书开放平台客户端封装（消息、联系人等，bot 身份，走 lark-oapi SDK）。"""
+"""飞书开放平台客户端封装（消息、联系人等，bot 身份，走 lark-oapi SDK）。
+
+async 接口内部用 ``asyncio.to_thread`` 包装同步 SDK 调用，避免阻塞事件循环
+（SDK 回调线程若超时不 ACK，飞书会重推事件）。
+"""
 from __future__ import annotations
 
 from collections.abc import Mapping
+import asyncio
 import json
 
 from .config import CFG
@@ -79,7 +84,11 @@ async def send_text(open_id: str, text: str) -> None:
                          .content(json.dumps({"text": text}, ensure_ascii=False))
                          .build())
            .build())
-    resp = client().im.v1.message.create(req)
+
+    def _do():
+        return client().im.v1.message.create(req)
+
+    resp = await asyncio.to_thread(_do)
     if not resp.success():
         raise RuntimeError(f"发消息失败: {resp.code} {resp.msg}")
 
@@ -96,7 +105,11 @@ async def send_card(open_id: str, card: dict) -> str | None:
                          .content(json.dumps(card, ensure_ascii=False))
                          .build())
            .build())
-    resp = client().im.v1.message.create(req)
+
+    def _do():
+        return client().im.v1.message.create(req)
+
+    resp = await asyncio.to_thread(_do)
     if not resp.success():
         raise RuntimeError(f"发卡片失败: {resp.code} {resp.msg}")
     return resp.data.message_id
@@ -106,12 +119,15 @@ async def update_card(token: str, card: dict) -> None:
     """通过卡片回调 token 原地更新卡片（回调后 30 分钟内有效，最多更新 2 次）。"""
     import urllib.request
 
-    req = urllib.request.Request(
-        "https://open.feishu.cn/open-apis/interactive/v1/card/update",
-        data=json.dumps({"token": token, "card": card}).encode("utf-8"),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {_tenant_token()}"})
-    resp = json.load(urllib.request.urlopen(req, timeout=10))
+    def _do():
+        req = urllib.request.Request(
+            "https://open.feishu.cn/open-apis/interactive/v1/card/update",
+            data=json.dumps({"token": token, "card": card}).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {_tenant_token()}"})
+        return json.load(urllib.request.urlopen(req, timeout=10))
+
+    resp = await asyncio.to_thread(_do)
     if resp.get("code") not in (0, None):
         raise RuntimeError(f"更新卡片失败: {resp.get('code')} {resp.get('msg')}")
 

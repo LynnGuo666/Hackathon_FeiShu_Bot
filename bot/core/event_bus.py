@@ -15,9 +15,10 @@ log = logging.getLogger(__name__)
 _seen_events: dict[str, float] = {}
 _DEDUP_WINDOW = 600
 # 卡片回调幂等：SDK ws 对 CARD 帧不回 ACK，飞书会重推；按「操作者+卡片+动作」去重
-_seen_card_actions: dict[str, float] = _seen_events  # 复用同一个清理窗口字典会互相干扰，单独建
-_seen_card_actions = {}
+_seen_card_actions: dict[str, float] = {}
 _CARD_DEDUP_WINDOW = 120  # 卡片操作 2 分钟内视为重复（正常点击不会这么密）
+# 去重表容量上限：超出淘汰最旧，防长期运行内存增长
+_DEDUP_MAX_ENTRIES = 5000
 
 
 def _dedup(event: dict) -> bool:
@@ -33,7 +34,14 @@ def _dedup(event: dict) -> bool:
         log.info("重复事件已跳过: %s", eid)
         return True
     _seen_events[eid] = now
+    _evict_oldest(_seen_events)
     return False
+
+
+def _evict_oldest(table: dict[str, float]) -> None:
+    if len(table) > _DEDUP_MAX_ENTRIES:
+        for k in sorted(table, key=table.get)[:len(table) - _DEDUP_MAX_ENTRIES]:
+            table.pop(k, None)
 
 
 def _card_dedup(ctx) -> bool:
@@ -49,6 +57,7 @@ def _card_dedup(ctx) -> bool:
         log.info("重复卡片回调已跳过: %s", key)
         return True
     _seen_card_actions[key] = now
+    _evict_oldest(_seen_card_actions)
     return False
 
 

@@ -94,20 +94,18 @@ def build_dispatcher():
 
 
 def start_scheduler() -> None:
-    from apscheduler.schedulers.background import BackgroundScheduler
+    """定时任务统一跑在 bot 后台事件循环线程（B4）。
 
-    scheduler = BackgroundScheduler()
+    AsyncIOScheduler 绑定该循环：job 协程与事件处理同线程，共享状态无需跨线程加锁；
+    阻塞 IO 由仓库层 to_thread 解决。
+    """
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    scheduler = AsyncIOScheduler(event_loop=_BACKGROUND_LOOP, timezone="Asia/Shanghai")
     for name, interval, fn in REGISTRY.jobs:
-        # 定时任务里可能跑同步阻塞 IO，用独立线程池
-        scheduler.add_job(_job_wrapper(fn), "interval", minutes=interval, id=name, name=name)
+        scheduler.add_job(fn, "interval", minutes=interval, id=name, name=name)
         log.info("注册定时任务 %s：每 %d 分钟", name, interval)
     scheduler.start()
-
-
-def _job_wrapper(fn):
-    def run():
-        asyncio.run(fn())
-    return run
 
 
 def fetch_tenant_key() -> None:
@@ -137,9 +135,11 @@ def main() -> None:
     from lark_oapi.ws import Client as WsClient
 
     from .core.config import CFG
+    from .core.service import init_services
     if not CFG.has_app_credentials:
         raise SystemExit("缺少 FEISHU_APP_ID / FEISHU_APP_SECRET，请复制 .env.example 为 .env 并填写。")
 
+    init_services()  # 按 DATA_BACKEND 装配仓库（feishu / api 预留）
     fetch_tenant_key()
     refresh_admins()
     _start_background_loop()

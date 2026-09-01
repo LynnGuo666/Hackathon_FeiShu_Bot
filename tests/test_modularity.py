@@ -1,6 +1,8 @@
 import asyncio
 import json
 import unittest
+import types
+import unittest.mock
 from unittest.mock import patch
 
 from bot.core.registry import Registry
@@ -28,30 +30,56 @@ class RegistryScopeTests(unittest.TestCase):
         self.assertTrue(registry.allows_card("管理员卡片", True))
 
 
+class FakeOrganizerRepo:
+    """duck-typing 假实现：与 FeishuOrganizerRepo 同一方法契约。"""
+
+    def __init__(self, organizers):
+        self.organizers = organizers
+        self.updates = []
+
+    async def get_by_open_id(self, open_id):
+        return next((o for o in self.organizers if o.open_id == open_id), None)
+
+    async def get_by_binding_code(self, code):
+        return next((o for o in self.organizers if o.binding_code == code), None)
+
+    async def list_all(self):
+        return self.organizers
+
+    async def update(self, record_id, **fields):
+        self.updates.append((record_id, fields))
+
+    async def batch_update(self, items):
+        self.updates.extend(items)
+
+
 class BindingCodeServiceTests(unittest.TestCase):
     def test_only_empty_codes_are_generated_and_persisted(self):
-        class FakeStore:
-            def __init__(self):
-                self.records = [
-                    {"record_id": "rec_existing", "fields": {"姓名": "已有", "绑定码": "ZZB-EXISTING"}},
-                    {"record_id": "rec_empty", "fields": {"姓名": "待绑定", "身份": "导师"}},
-                ]
-                self.updated = None
+        from bot.core.models import Organizer
+        from bot.core.service import SVC
 
-            def list_records(self, _table):
-                return self.records
-
-            def batch_update(self, _table, updates):
-                self.updated = updates
-
-        store = FakeStore()
-        generated = generate_binding_codes(store)
+        repo = FakeOrganizerRepo([
+            Organizer(record_id="rec_existing", name="已有", binding_code="ZZB-EXISTING"),
+            Organizer(record_id="rec_empty", name="待绑定", identity="导师"),
+        ])
+        generated = asyncio.run(self._generate(repo))
 
         self.assertEqual(len(generated), 1)
         self.assertEqual(generated[0]["name"], "待绑定")
         self.assertEqual(generated[0]["identity"], "导师")
         self.assertRegex(generated[0]["code"], r"^ZZB-[A-Z2-9]{8}$")
-        self.assertEqual(store.updated[0]["record_id"], "rec_empty")
+        self.assertEqual(repo.updates[0][0], "rec_empty")
+        self.assertEqual(repo.updates[0][1]["binding_code"], generated[0]["code"])
+
+    @staticmethod
+    async def _generate(repo):
+        from bot.core import service
+        old = service.SVC.organizers
+        service.SVC.organizers = repo
+        try:
+            return await generate_binding_codes()
+        finally:
+            service.SVC.organizers = old
 
 
 class EventRoutingTests(unittest.TestCase):

@@ -6,14 +6,17 @@
   字段合并时优先取主报名人行，其次先到先得。
 - 队友关系按报名记录写入队伍表（队长=主报名人，队友=link 到选手）。
 - 增量：按手机号比对已有选手，已存在则更新，否则分配新 选手ID（WY01-XXXX）。
+
+报名表字段结构（角色前缀 + 中文列名）是报名表单的领域知识，保留在本模块；
+选手库写入一律经 SVC 仓库接口（core.service）。
 """
 from __future__ import annotations
 
 import logging
 import re
 
-from ...core.base_store import BaseStore
-from ...core.config import CFG
+from ...core.models import Registration
+from ...core.service import SVC
 
 log = logging.getLogger(__name__)
 
@@ -37,42 +40,25 @@ def is_valid_phone(phone: str) -> bool:
     return bool(VALID_PHONE_RE.match(phone))
 
 
-def audit_status(fields: dict) -> str:
-    """审核状态读回可能是字符串或 [选项] 列表，统一取字符串。"""
-    v = fields.get("审核状态")
-    if isinstance(v, list):
-        return str(v[0]).strip() if v else ""
-    return str(v or "").strip()
-
-
 def _text(cell) -> str:
-    """bitable 文本字段可能是字符串或 [{text:...}] 分段数组。"""
-    if cell is None:
-        return ""
-    if isinstance(cell, str):
-        return cell.strip()
-    if isinstance(cell, list):
-        parts = []
-        for seg in cell:
-            if isinstance(seg, dict):
-                parts.append(str(seg.get("text", "")))
-            else:
-                parts.append(str(seg))
-        return "".join(parts).strip()
-    return str(cell).strip()
+    """bitable 文本字段可能是字符串或 [{text:...}] 分段数组（报名表原始字段仍需归一化）。"""
+    from ...adapters.feishu.cells import text
+    return text(cell)
 
 
 def _select_one(cell) -> str:
-    if isinstance(cell, list):
-        return _text(cell[0]) if cell else ""
-    return _text(cell)
+    from ...adapters.feishu.cells import select_one
+    return select_one(cell)
 
 
 def _select_many(cell) -> list[str]:
-    if isinstance(cell, list):
-        return [_text(x) for x in cell if _text(x)]
-    s = _text(cell)
-    return [s] if s else []
+    from ...adapters.feishu.cells import select_many
+    return select_many(cell)
+
+
+def audit_status_of(audit_cell) -> str:
+    """审核状态读回可能是字符串或 [选项] 列表，统一取字符串。"""
+    return _select_one(audit_cell)
 
 
 def extract_appearances(record_fields: dict) -> list[dict]:
@@ -97,12 +83,12 @@ def extract_appearances(record_fields: dict) -> list[dict]:
     return out
 
 
-def merge_contestants(reg_records: list[dict]) -> dict[str, dict]:
+def merge_contestants(registrations: list[Registration]) -> dict[str, dict]:
     """按手机号合并所有人 -> {phone: {fields..., appearances: [...]}}"""
     people: dict[str, dict] = {}
-    for rec in reg_records:
-        fields = rec.get("fields") or {}
-        record_id = rec.get("record_id")
+    for reg in registrations:
+        fields = reg.fields
+        record_id = reg.record_id
         for app in extract_appearances(fields):
             p = people.setdefault(app["phone"], {"appearances": []})
             is_owner = app["role"] == "主报名人"
@@ -135,80 +121,62 @@ def merge_contestants(reg_records: list[dict]) -> dict[str, dict]:
     return people
 
 
-def run_sync(store: BaseStore | None = None, reg_store: BaseStore | None = None) -> dict:
+async def run_sync() -> dict:
     """执行一次同步，返回统计信息。"""
-    store = store or BaseStore(CFG.db_base_token)
-    reg_store = reg_store or BaseStore(CFG.reg_base_token)
+    registrations = await SVC.registrations.list_all()
+    people = merge_contestants(registrations)
 
-    reg_records = reg_store.list_records(CFG.reg_table_id)
-    people = merge_contestants(reg_records)
-
-    existing = store.list_records(CFG.tbl_contestants)
-    by_phone: dict[str, dict] = {}
+    existing = await SVC.contestants.list_all()
+    by_phone: dict[str, object] = {}
     max_seq = 0
-    for r in existing:
-        f = r.get("fields") or {}
-        ph = normalize_phone(f.get("手机号"))
-        if ph:
-            by_phone[ph] = r
+    for c in existing:
+        if c.phone:
+            by_phone[c.phone] = c
             # 兼容旧格式 WY-0001 与新格式 WY01-0001
-            m = re.match(r"WY(?:01)?-(\d+)", _text(f.get("选手ID")))
+            m = re.match(r"WY(?:01)?-(\d+)", c.contestant_no)
             if m:
                 max_seq = max(max_seq, int(m.group(1)))
 
     to_create, to_update = [], []
     for phone, p in sorted(people.items()):
         row = {
-            "姓名": p.get("姓名", ""),
-            "手机号": phone,
-            "vx号": p.get("vx号", ""),
-            "学校": p.get("学校", ""),
-            "专业": p.get("专业", ""),
-            "审核状态": p.get("审核状态", "未审核"),
+            "name": p.get("姓名", ""),
+            "phone": phone,
+            "vx": p.get("vx号", ""),
+            "school": p.get("学校", ""),
+            "major": p.get("专业", ""),
+            "audit_status": p.get("审核状态", "未审核"),
         }
         if p.get("年级"):
-            row["年级"] = p["年级"]
+            row["grade"] = p["年级"]
         if p.get("身份"):
-            row["身份"] = p["身份"]
+            row["identity"] = p["身份"]
         if p.get("意向角色"):
-            row["意向角色"] = p["意向角色"]
+            row["intent_roles"] = p["意向角色"]
         old = by_phone.get(phone)
-        if old:
-            oldf = old.get("fields") or {}
-
-            def changed(k, v):
-                cur = oldf.get(k)
-                if isinstance(cur, list):  # select 字段读回是 [选项] 形式
-                    cur = cur[0] if len(cur) == 1 else cur
-                if cur in (None, "") and (v == "" or v == []):  # 空值等价，避免反复清写
-                    return False
-                if isinstance(v, list):  # 多选字段读回/写入都是列表
-                    return sorted(map(str, cur if isinstance(cur, list) else [cur])) != sorted(map(str, v)) if cur is not None else True
-                return cur != v
-
-            diff = {k: v for k, v in row.items() if changed(k, v)}
+        if old is not None:
+            diff = {k: v for k, v in row.items() if _field_changed(old, k, v)}
             if diff:
-                to_update.append({"record_id": old["record_id"], "fields": diff})
+                to_update.append((old.record_id, diff))
         else:
             max_seq += 1
-            row["选手ID"] = f"WY01-{max_seq:04d}"
-            row["验证状态"] = "未验证"
+            row["contestant_no"] = f"WY01-{max_seq:04d}"
+            row["verify_status"] = "未验证"
             to_create.append(row)
 
     if to_create:
-        store.batch_create(CFG.tbl_contestants, to_create)
+        await SVC.contestants.create_many(to_create)
     if to_update:
-        store.batch_update(CFG.tbl_contestants, to_update)
+        await SVC.contestants.batch_update(to_update)
 
     # 重新读取选手表建立 phone -> record_id 映射（含新建）
-    contestants = {normalize_phone(r["fields"].get("手机号")): r["record_id"]
-                   for r in store.list_records(CFG.tbl_contestants) if normalize_phone((r.get("fields") or {}).get("手机号"))}
+    contestants = {c.phone: c.record_id for c in await SVC.contestants.list_all() if c.phone}
 
     # 队伍表 upsert（按 报名记录ID）：只有明确预组队（是否预组队=是）的报名才进队伍表
-    team_rows = {}
-    for rec in reg_records:
-        fields = rec.get("fields") or {}
-        rid = rec.get("record_id")
+    team_rows: dict[str, dict] = {}
+    for reg in registrations:
+        fields = reg.fields
+        rid = reg.record_id
         if _select_one(fields.get("是否预组队")) != "是":
             continue
         apps = extract_appearances(fields)
@@ -217,42 +185,56 @@ def run_sync(store: BaseStore | None = None, reg_store: BaseStore | None = None)
         owner = next((a for a in apps if a["role"] == "主报名人"), None)
         teammates = [a for a in apps if a["role"] != "主报名人"]
         team_rows[rid] = {
-            "队伍ID": f"T-{rid[-8:]}" if rid else "",
-            "报名记录ID": rid or "",
-            "是否预组队": "是",
-            "同意统一分配": _select_one(fields.get("是否同意统一分配")) or "否",
+            "team_no": f"T-{rid[-8:]}" if rid else "",
+            "reg_record_id": rid or "",
+            "preformed": "是",
+            "agree_assign": _select_one(fields.get("是否同意统一分配")) or "否",
             "_owner": contestants.get(owner["phone"]) if owner else None,
             "_members": [contestants[a["phone"]] for a in teammates if a["phone"] in contestants],
         }
-    existing_teams = {r["fields"].get("报名记录ID"): r for r in store.list_records(CFG.tbl_teams)
-                      if (r.get("fields") or {}).get("报名记录ID")}
+    existing_teams = {t.reg_record_id: t for t in await SVC.teams.list_all() if t.reg_record_id}
     t_create, t_update = [], []
     for rid, t in team_rows.items():
-        linkf = {"队长": [{"id": t["_owner"]}] if t["_owner"] else [],
-                 "队友": [{"id": x} for x in t["_members"]]}
+        captain = [t["_owner"]] if t["_owner"] else []
+        members = list(t["_members"])
         if rid in existing_teams:
-            t_update.append({"record_id": existing_teams[rid]["record_id"], "fields": linkf})
+            t_update.append((existing_teams[rid].record_id,
+                             {"captain_ids": captain, "member_ids": members}))
         else:
-            t_create.append({"队伍ID": t["队伍ID"], "报名记录ID": t["报名记录ID"],
-                             "是否预组队": t["是否预组队"], "同意统一分配": t["同意统一分配"], **linkf})
+            t_create.append({"team_no": t["team_no"], "reg_record_id": t["reg_record_id"],
+                             "preformed": t["preformed"], "agree_assign": t["agree_assign"],
+                             "captain_ids": captain, "member_ids": members})
     if t_create:
-        store.batch_create(CFG.tbl_teams, t_create)
+        await SVC.teams.create_many(t_create)
     if t_update:
-        store.batch_update(CFG.tbl_teams, t_update)
+        await SVC.teams.batch_update(t_update)
 
-    stats = {"报名记录": len(reg_records), "选手(去重后)": len(people),
+    stats = {"报名记录": len(registrations), "选手(去重后)": len(people),
              "新建选手": len(to_create), "更新选手": len(to_update),
-             "预组队队伍": len(team_rows), "无效手机号跳过的人次": _count_invalid(reg_records)}
+             "预组队队伍": len(team_rows), "无效手机号跳过的人次": _count_invalid(registrations)}
     log.info("同步完成: %s", stats)
     return stats
 
 
-def _count_invalid(reg_records: list[dict]) -> int:
+def _field_changed(old, key: str, value) -> bool:
+    """与已有选手实体比较字段是否变化（空值等价，避免反复清写）。"""
+    cur = getattr(old, key, None)
+    if cur is None:
+        cur = ""
+    if isinstance(cur, list) or isinstance(value, list):
+        return sorted(map(str, cur if isinstance(cur, list) else [cur])) != \
+               sorted(map(str, value if isinstance(value, list) else [value]))
+    if cur in ("", None) and (value == "" or value == []):
+        return False
+    return cur != value
+
+
+def _count_invalid(registrations: list[Registration]) -> int:
     n = 0
-    for rec in reg_records:
+    for reg in registrations:
         for role in ROLES:
             p = ROLE_FIELD_PREFIX[role]
-            raw = normalize_phone(rec["fields"].get(f"{p}手机号"))
+            raw = normalize_phone(reg.fields.get(f"{p}手机号"))
             if raw and not is_valid_phone(raw):
                 n += 1
     return n

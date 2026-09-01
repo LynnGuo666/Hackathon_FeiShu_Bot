@@ -18,8 +18,8 @@ _registered = False
 
 
 async def sync_job() -> None:
-    run_sync()
-    sync_group_audience_options()
+    await run_sync()
+    await sync_group_audience_options()
 
 
 async def admins_refresh_job() -> None:

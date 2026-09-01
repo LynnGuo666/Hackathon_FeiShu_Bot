@@ -10,11 +10,85 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
+import threading
+import time
 
 from .config import CFG
 
 CLI_ENV = {"LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1", "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1"}
+
+# ---------- 限流 + 重试（B2）：飞书 API 有频率限制，批量操作易触发 429/限流码 ----------
+
+# 飞书常见限流/服务端错误码：命中即重试
+_RETRYABLE_CODES = {99991400, 99991402, 91403, 91499, 1254045, 1254046, 1254290, 1254291, 1254292}
+_MAX_RETRIES = 3
+_BASE_DELAY = 0.5
+
+_RATE_LOCK = threading.Lock()
+_RATE_STATE = {"tokens": 15.0, "ts": time.monotonic()}
+_RATE_QPS = 15.0
+
+
+def _rate_qps() -> float:
+    try:
+        return max(1.0, float(os.environ.get("FEISHU_QPS", "15")))
+    except ValueError:
+        return 15.0
+
+
+def _acquire_rate_slot() -> None:
+    """简易令牌桶：默认 15 QPS，防止批量写触发频控。"""
+    global _RATE_QPS
+    qps = _rate_qps()
+    if qps != _RATE_QPS:
+        _RATE_QPS = qps
+    while True:
+        with _RATE_LOCK:
+            now = time.monotonic()
+            _RATE_STATE["tokens"] = min(qps, _RATE_STATE["tokens"] + (now - _RATE_STATE["ts"]) * qps)
+            _RATE_STATE["ts"] = now
+            if _RATE_STATE["tokens"] >= 1.0:
+                _RATE_STATE["tokens"] -= 1.0
+                return
+            wait = (1.0 - _RATE_STATE["tokens"]) / qps
+        time.sleep(wait)
+
+
+def _is_retryable(code) -> bool:
+    try:
+        return int(code) in _RETRYABLE_CODES or 500 <= int(code) < 600
+    except (ValueError, TypeError):
+        return False
+
+
+def _with_retry(call, what: str):
+    """对限流/5xx 错误码指数退避重试（0.5s×2ⁿ+抖动，最多 3 次）。
+
+    SDK 失败以 RuntimeError("...: <code> <msg>") 抛出，这里解析出错误码判断是否可重试。
+    """
+    _acquire_rate_slot()
+    last: Exception | None = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            return call()
+        except RuntimeError as e:
+            last = e
+            code_num = _error_code_of(e)
+            if attempt >= _MAX_RETRIES or code_num is None or code_num not in _RETRYABLE_CODES:
+                raise
+            delay = _BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.2)
+            time.sleep(delay)
+    raise last  # pragma: no cover
+
+
+def _error_code_of(e: RuntimeError) -> int | None:
+    """从 RuntimeError 消息尾部解析飞书错误码（形如 "SDK 读取失败: 99991400 too many"）。"""
+    import re
+
+    m = re.search(r":\s*(\d{6,})\b", str(e))
+    return int(m.group(1)) if m else None
 
 
 def _cli(*args: str) -> dict:
@@ -139,7 +213,8 @@ class BaseStore:
                  .user_id_type("open_id"))
             if page_token:
                 b = b.page_token(page_token)
-            resp = client.bitable.v1.app_table_record.list(b.build())
+            resp = _with_retry(lambda: client.bitable.v1.app_table_record.list(b.build()),
+                               "SDK 读取")
             if not resp.success():
                 raise RuntimeError(f"SDK 读取失败: {resp.code} {resp.msg}")
             records.extend({"record_id": it.record_id, "fields": it.fields} for it in (resp.data.items or []))
@@ -159,7 +234,8 @@ class BaseStore:
                .app_token(self.base_token)
                .table_id(self.resolve_table_id(table))
                .request_body(body.build()))
-        resp = client.bitable.v1.app_table_record.batch_create(req.build())
+        resp = _with_retry(lambda: client.bitable.v1.app_table_record.batch_create(req.build()),
+                           "SDK 批量新建")
         if not resp.success():
             raise RuntimeError(f"SDK 批量新建失败: {resp.code} {resp.msg}")
         return [{"record_id": it.record_id, "fields": it.fields} for it in (resp.data.records or [])]
@@ -175,7 +251,8 @@ class BaseStore:
                .app_token(self.base_token)
                .table_id(self.resolve_table_id(table))
                .request_body(body.build()))
-        resp = client.bitable.v1.app_table_record.batch_update(req.build())
+        resp = _with_retry(lambda: client.bitable.v1.app_table_record.batch_update(req.build()),
+                           "SDK 批量更新")
         if not resp.success():
             raise RuntimeError(f"SDK 批量更新失败: {resp.code} {resp.msg}")
 

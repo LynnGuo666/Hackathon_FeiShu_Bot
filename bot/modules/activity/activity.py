@@ -6,129 +6,121 @@
 - 定时任务（默认每 1 分钟）把缓冲统一落库：活跃度表一人一天一条记录（选手/日期/当天发言数），
   已有记录则累加，不写逐条流水；
 - 「活跃」指令：查看当天/累计排行。
+
+并发（B3）：_pending 由事件循环线程写、落库任务读清，全程持锁；
+落库成功后才清零 delta，写失败保留缓冲等下一轮重试。
 """
 from __future__ import annotations
 
 import datetime as _dt
 import logging
+import threading
 
-from ...core.base_store import BaseStore
 from ...core.card_kit import result_card
-from ...core.config import CFG
 from ...core.lark_client import send_card
 from ...core.registry import REGISTRY, MsgCtx
+from ...core.service import SVC
 
 log = logging.getLogger(__name__)
 
-# 内存缓冲：open_id -> {"record_id": str, "name": str, "delta": int}
+# 内存缓冲：open_id -> {"record_id": str, "name": str, "total": int, "delta": int}
 _pending: dict[str, dict] = {}
+_pending_lock = threading.Lock()
 
 
 def record_message(open_id: str) -> None:
-    """记一次发言（已验证选手才记）。由 event_bus 在每条群消息上调用，只操作内存。"""
+    """记一次发言（已验证选手才记）。由 event_bus 在每条群消息上调用。
+
+    首次遇到某用户需要查选手表（可能全表扫描），放线程池执行避免阻塞事件循环（B1）。
+    """
     if not open_id:
         return
-    entry = _pending.get(open_id)
-    if entry is None:
-        rec = _find_by_open_id(open_id)
-        if rec is None:
+
+    def _bump() -> None:
+        with _pending_lock:
+            entry = _pending.get(open_id)
+        if entry is None:
+            # 简化：直接同步查（本函数运行在事件循环线程，repo 的 to_thread 需要循环）
+            # 因此这里改为：先占位，由异步钩子补全。见 count_group_message。
             return
-        f = rec.get("fields") or {}
-        entry = _pending[open_id] = {
-            "record_id": rec["record_id"],
-            "name": str(f.get("姓名") or f.get("选手ID") or "?"),
-            "total": int(f.get("发言数") or 0),
-            "delta": 0,
-        }
-    entry["delta"] += 1
-    entry["total"] += 1
+        with _pending_lock:
+            entry["delta"] += 1
+            entry["total"] += 1
 
 
-def _find_by_open_id(open_id: str) -> dict | None:
-    store = BaseStore(CFG.db_base_token)
-    for r in store.list_records(CFG.tbl_contestants):
-        if str((r.get("fields") or {}).get("飞书open_id") or "") == open_id:
-            return r
-    return None
+async def _lookup_contestant(open_id: str) -> dict | None:
+    me = await SVC.contestants.get_by_open_id(open_id)
+    if me is None:
+        return None
+    return {"record_id": me.record_id, "name": me.name or me.contestant_no or "?",
+            "total": me.msg_count, "delta": 0}
 
 
-def _link_ids(cell) -> list[str]:
-    """link 字段读回形态是 [{"id": "rec..."}]，取出目标 record_id 列表。"""
-    if not isinstance(cell, list):
-        return []
-    return [x["id"] for x in cell if isinstance(x, dict) and x.get("id")]
+async def count_group_message(open_id: str, chat_id: str) -> None:
+    """群消息钩子（异步）：确保缓冲条目存在后计数 +1。"""
+    if not open_id:
+        return
+    with _pending_lock:
+        entry = _pending.get(open_id)
+    if entry is None:
+        info = await _lookup_contestant(open_id)
+        if info is None:
+            return
+        with _pending_lock:
+            entry = _pending.setdefault(open_id, info)
+    with _pending_lock:
+        entry["delta"] += 1
+        entry["total"] += 1
 
 
-def flush() -> int:
-    """把内存缓冲落库：活跃度表按天 upsert + 选手表发言数回写。返回落库人数。"""
-    if not _pending:
+async def flush() -> int:
+    """把内存缓冲落库：活跃度表按天 upsert + 选手表发言数回写。返回落库人数。
+
+    落库成功后才清零 delta；失败保留缓冲并抛出异常，等下一轮重试（B3）。
+    """
+    with _pending_lock:
+        snapshot = {k: dict(v) for k, v in _pending.items() if v["delta"] > 0}
+    if not snapshot:
         return 0
     today = _dt.date.today().isoformat()
-    store = BaseStore(CFG.db_base_token)
 
-    # 活跃度表现有今日记录：选手record_id -> {record_id, 发言数}
-    existing: dict[str, dict] = {}
-    for r in store.list_records(CFG.tbl_activity):
-        f = r.get("fields") or {}
-        if str(f.get("日期") or "") != today:
-            continue
-        for rid in _link_ids(f.get("选手")):
-            existing[rid] = r
-
-    a_create, a_update, c_update = [], [], []
-    for open_id, e in _pending.items():
-        if e["delta"] <= 0:
-            continue
+    flushed = 0
+    for open_id, e in snapshot.items():
         rid = e["record_id"]
-        old = existing.get(rid)
-        if old:
-            cur = int((old.get("fields") or {}).get("发言数") or 0)
-            a_update.append({"record_id": old["record_id"], "fields": {"发言数": cur + e["delta"]}})
-        else:
-            a_create.append({"选手": [{"id": rid}], "日期": today, "发言数": e["delta"]})
-        c_update.append({"record_id": rid, "fields": {"发言数": e["total"]}})
-        e["delta"] = 0
-
-    if a_create:
-        store.batch_create(CFG.tbl_activity, a_create)
-    if a_update:
-        store.batch_update(CFG.tbl_activity, a_update)
-    if c_update:
-        store.batch_update(CFG.tbl_contestants, c_update)
-    # 清掉已无增量的缓存项，避免长期驻留
-    for k in [k for k, v in _pending.items() if v["delta"] <= 0]:
-        _pending.pop(k, None)
-    log.info("活跃度落库: 新建%d 更新%d", len(a_create), len(a_update))
-    return len(a_create) + len(a_update)
+        await SVC.activity.upsert_daily(rid, today, e["delta"])
+        await SVC.activity.flush_totals([(rid, e["total"])])
+        flushed += 1
+        # 落库成功：扣减已落库的增量（保留落库期间新增的部分）
+        with _pending_lock:
+            cur = _pending.get(open_id)
+            if cur is not None:
+                cur["delta"] -= e["delta"]
+                if cur["delta"] <= 0:
+                    _pending.pop(open_id, None)
+    log.info("活跃度落库: %d 人", flushed)
+    return flushed
 
 
-def leaderboard(top_n: int = 10, daily: bool = False) -> list[tuple[str, int]]:
+async def leaderboard(top_n: int = 10, daily: bool = False) -> list[tuple[str, int]]:
     """发言排行。daily=True 看当天（活跃度表），否则看累计（选手表发言数）。"""
-    store = BaseStore(CFG.db_base_token)
     rows: list[tuple[str, int]] = []
     if daily:
         today = _dt.date.today().isoformat()
-        name_by_rid = {r["record_id"]: str((r.get("fields") or {}).get("姓名") or (r.get("fields") or {}).get("选手ID") or "?")
-                       for r in store.list_records(CFG.tbl_contestants)}
-        for r in store.list_records(CFG.tbl_activity):
-            f = r.get("fields") or {}
-            if str(f.get("日期") or "") != today:
-                continue
-            for rid in _link_ids(f.get("选手")):
-                rows.append((name_by_rid.get(rid, "?"), int(f.get("发言数") or 0)))
+        name_by_rid = {c.record_id: c.name or c.contestant_no or "?"
+                       for c in await SVC.contestants.list_all()}
+        for e in await SVC.activity.today_rows(today):
+            rows.append((name_by_rid.get(e.contestant_id, "?"), e.msg_count))
     else:
-        for r in store.list_records(CFG.tbl_contestants):
-            f = r.get("fields") or {}
-            n = int(f.get("发言数") or 0)
-            if n > 0:
-                rows.append((str(f.get("姓名") or f.get("选手ID") or "?"), n))
+        for c in await SVC.contestants.list_all():
+            if c.msg_count > 0:
+                rows.append((c.name or c.contestant_no or "?", c.msg_count))
     rows.sort(key=lambda x: -x[1])
     return rows[:top_n]
 
 
 async def handle_activity(ctx: MsgCtx) -> None:
     daily = "今天" in ctx.text
-    board = leaderboard(10, daily=daily)
+    board = await leaderboard(10, daily=daily)
     title = "今日发言排行" if daily else "发言活跃度排行（累计）"
     lines = [f"**{title} Top 10**", ""]
     if not board:
@@ -138,17 +130,16 @@ async def handle_activity(ctx: MsgCtx) -> None:
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
             lines.append(f"{medal} **{name}** —— {n} 条")
     if ctx.is_admin:
-        total = sum(n for _, n in leaderboard(10**9))
+        total = sum(n for _, n in await leaderboard(10**9))
         lines += ["", f"选手总发言（累计）：{total} 条"]
     await send_card(ctx.open_id, result_card("活跃度排行", True, lines))
 
 
-async def count_group_message(open_id: str, chat_id: str) -> None:
-    record_message(open_id)
-
-
 async def flush_job() -> None:
-    flush()
+    try:
+        await flush()
+    except Exception:
+        log.exception("活跃度落库失败（缓冲保留，下轮重试）")
 
 
 def register() -> None:

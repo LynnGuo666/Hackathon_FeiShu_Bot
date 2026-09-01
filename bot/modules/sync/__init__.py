@@ -7,11 +7,11 @@
 from ...core.permissions import (admins_status_line, is_admin, refresh_admins,
                                   test_recipient)
 from .audience import sync_group_audience_options
-from .sync import (audit_status, is_valid_phone, normalize_phone, run_sync)
+from .sync import (audit_status_of, is_valid_phone, normalize_phone, run_sync)
 
 __all__ = [
     "admins_status_line",
-    "audit_status",
+    "audit_status_of",
     "is_admin",
     "is_valid_phone",
     "normalize_phone",
