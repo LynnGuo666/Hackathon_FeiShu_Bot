@@ -1,6 +1,7 @@
 """新增架构层的单元测试：实体映射、重试限流、投票防双投、活跃度落库幂等。"""
 import asyncio
 import threading
+import time
 import unittest
 import unittest.mock
 import types
@@ -250,6 +251,171 @@ class EntityMappingTests(unittest.TestCase):
     def test_organizer_committee_identity(self):
         self.assertEqual(Organizer(identity="导师").committee_identity, "组委会-导师")
         self.assertEqual(Organizer().committee_identity, "组委会-主办方")
+
+
+class CardDedupKeyTests(unittest.TestCase):
+    """卡片去重键含完整按钮参数：同卡片不同项目按钮不互相吞，同一按钮重推仍幂等。"""
+
+    def setUp(self):
+        from bot.core import event_bus
+        event_bus._seen_card_actions.clear()
+
+    def _ctx(self, project_rid):
+        return types.SimpleNamespace(
+            open_id="ou_1", message_id="om_1", action_value="vote",
+            raw={"action": {"value": {"action": "vote", "project_record_id": project_rid}}})
+
+    def test_same_button_retransmission_is_duplicate(self):
+        from bot.core.event_bus import _card_dedup
+        self.assertFalse(_card_dedup(self._ctx("rec_p1")))
+        self.assertTrue(_card_dedup(self._ctx("rec_p1")))
+
+    def test_different_project_button_is_not_duplicate(self):
+        from bot.core.event_bus import _card_dedup
+        self.assertFalse(_card_dedup(self._ctx("rec_p1")))
+        self.assertFalse(_card_dedup(self._ctx("rec_p2")))
+
+
+class CardExpiryTests(unittest.TestCase):
+    """验证卡片 15 分钟未操作自动过期；已提交的卡片不再过期；过期后迟到提交被拒。"""
+
+    def setUp(self):
+        from bot.modules.auth import auth
+        auth._pending_cards.clear()
+
+    def test_stale_card_is_expired_and_patched(self):
+        from bot.modules.auth import auth
+        auth._pending_cards["om_old"] = {"sent_at": time.time() - 16 * 60, "expired": False}
+        with unittest.mock.patch.object(auth, "edit_card",
+                                        new_callable=unittest.mock.AsyncMock) as edit:
+            n = asyncio.run(auth._expire_stale_cards())
+        self.assertEqual(n, 1)
+        edit.assert_awaited_once()
+        self.assertEqual(edit.await_args.args[0], "om_old")
+        self.assertTrue(auth._pending_cards["om_old"]["expired"])
+
+    def test_fresh_and_consumed_cards_are_not_patched(self):
+        from bot.modules.auth import auth
+        auth._track_card("om_new")
+        auth._track_card("om_submitted")
+        self.assertTrue(auth._consume_card("om_submitted"))
+        with unittest.mock.patch.object(auth, "edit_card",
+                                        new_callable=unittest.mock.AsyncMock) as edit:
+            n = asyncio.run(auth._expire_stale_cards())
+        self.assertEqual(n, 0)
+        edit.assert_not_awaited()
+
+    def test_late_submit_on_expired_card_is_rejected(self):
+        from bot.modules.auth import auth
+        auth._track_card("om_late")
+        auth._pending_cards["om_late"]["expired"] = True
+        self.assertFalse(auth._consume_card("om_late"))
+
+    def test_untracked_card_submit_is_allowed(self):
+        from bot.modules.auth import auth
+        self.assertTrue(auth._consume_card("om_unknown"))
+
+
+class FakeScoreRepos:
+    """积分读改写竞态测试的假仓库：update 人为延迟放大竞态窗口。"""
+
+    def __init__(self, contestant):
+        self.contestant = contestant
+        self.entries: list[tuple[int, int]] = []
+        self.delay = 0.05
+
+    async def get(self, record_id):
+        return self.contestant
+
+    async def update(self, record_id, **fields):
+        await asyncio.sleep(self.delay)
+        for k, v in fields.items():
+            setattr(self.contestant, k, v)
+
+    async def add(self, contestant_record_id, delta, reason, total_after):
+        self.entries.append((delta, total_after))
+
+
+class ScoreConcurrencyTests(unittest.TestCase):
+    """同一选手并发加分：选手粒度锁保证总分不丢增量。"""
+
+    def test_concurrent_add_score_no_lost_update(self):
+        from bot.core import service
+        from bot.modules.score.score import add_score
+
+        c = Contestant(record_id="rec_s1", score=0)
+        repo = FakeScoreRepos(c)
+        old_contestants, old_scores = service.SVC.contestants, service.SVC.scores
+        service.SVC.contestants = repo
+        service.SVC.scores = repo
+        try:
+            async def run_two():
+                await asyncio.gather(add_score("rec_s1", 5, "a"),
+                                     add_score("rec_s1", 5, "b"))
+            asyncio.run(run_two())
+        finally:
+            service.SVC.contestants = old_contestants
+            service.SVC.scores = old_scores
+
+        self.assertEqual(c.score, 10)
+        self.assertEqual(sorted(t for _, t in repo.entries), [5, 10])
+
+
+class FakeAuthContestantRepo:
+    """验证竞态测试的假选手仓库：update 人为延迟放大竞态窗口。"""
+
+    def __init__(self, contestants):
+        self.contestants = contestants
+        self.delay = 0.05
+        self.bind_writes: list[str] = []
+
+    async def get_by_open_id(self, open_id):
+        return next((c for c in self.contestants if c.open_id == open_id), None)
+
+    async def find_by_phone(self, phone):
+        return next((c for c in self.contestants if c.phone == phone), None)
+
+    async def update(self, record_id, **fields):
+        await asyncio.sleep(self.delay)
+        for c in self.contestants:
+            if c.record_id == record_id:
+                for k, v in fields.items():
+                    setattr(c, k, v)
+                if "open_id" in fields:
+                    self.bind_writes.append(fields["open_id"])
+
+
+class AuthDoubleClaimTests(unittest.TestCase):
+    """两个账号并发提交同一手机号：手机号锁 + 占用检查保证只有一方绑定成功。"""
+
+    def test_two_accounts_claim_same_phone_only_one_binds(self):
+        from bot.core import service
+        from bot.modules.auth import auth
+
+        rec = Contestant(record_id="rec_c1", phone="13800138000", vx="abcd")
+        repo = FakeAuthContestantRepo([rec])
+        old_contestants = service.SVC.contestants
+        service.SVC.contestants = repo
+        try:
+            def make_ctx(open_id):
+                return types.SimpleNamespace(
+                    open_id=open_id, message_id="", token=f"tk_{open_id}",
+                    form_value={"phone": "13800138000", "vx": "abcd"})
+
+            async def run_two():
+                await asyncio.gather(auth.handle_verify_submit(make_ctx("ou_a")),
+                                     auth.handle_verify_submit(make_ctx("ou_b")))
+
+            with unittest.mock.patch.object(auth, "send_text",
+                                            new_callable=unittest.mock.AsyncMock), \
+                    unittest.mock.patch("bot.core.lark_client.update_card",
+                                        new_callable=unittest.mock.AsyncMock):
+                asyncio.run(run_two())
+        finally:
+            service.SVC.contestants = old_contestants
+
+        self.assertIn(rec.open_id, ("ou_a", "ou_b"))
+        self.assertEqual(len(repo.bind_writes), 1)
 
 
 if __name__ == "__main__":

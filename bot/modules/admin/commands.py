@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 from ...core.card_kit import result_card
 from ...core.lark_client import create_group, send_card, send_text
 from ...core.models import GroupConfig
@@ -15,11 +17,14 @@ from ...core.registry import REGISTRY, MsgCtx
 from ...core.service import SVC
 from ..auth.binding_codes import generate_binding_codes
 from ..group.group import pull_user_into_groups, verified_users
-from ..sync.sync import run_sync
+from ..sync.sync import run_sync, sync_in_progress
 from ..vote.state import set_vote_open
 
 
 async def handle_sync(ctx: MsgCtx) -> None:
+    if sync_in_progress():
+        await send_text(ctx.open_id, "已有同步正在进行，请稍候再试。")
+        return
     await send_text(ctx.open_id, "开始同步报名表，请稍候…")
     stats = await run_sync()
     await send_card(ctx.open_id, result_card(
@@ -63,7 +68,8 @@ async def handle_create_group(ctx: MsgCtx) -> None:
     ] or ["选手"]
 
     try:
-        chat_id = create_group(
+        chat_id = await asyncio.to_thread(
+            create_group,
             name,
             owner_open_id=ctx.open_id,
             member_open_ids=[ctx.open_id],

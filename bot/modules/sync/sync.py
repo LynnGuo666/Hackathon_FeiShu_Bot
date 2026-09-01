@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -121,8 +122,22 @@ def merge_contestants(registrations: list[Registration]) -> dict[str, dict]:
     return people
 
 
+# 全局互斥：定时同步与手动「同步」并发跑会基于同一快照各自新建选手，
+# 破坏「手机号唯一键」不变量，因此同一时间只允许一个同步在运行。
+_sync_lock = asyncio.Lock()
+
+
+def sync_in_progress() -> bool:
+    return _sync_lock.locked()
+
+
 async def run_sync() -> dict:
-    """执行一次同步，返回统计信息。"""
+    """执行一次同步，返回统计信息（并发调用会串行等待）。"""
+    async with _sync_lock:
+        return await _run_sync_impl()
+
+
+async def _run_sync_impl() -> dict:
     registrations = await SVC.registrations.list_all()
     people = merge_contestants(registrations)
 

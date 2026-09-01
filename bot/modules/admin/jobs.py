@@ -11,13 +11,16 @@ from ..group.group import (
     promote_approved_job,
 )
 from ..sync.audience import sync_group_audience_options
-from ..sync.sync import run_sync
+from ..sync.sync import run_sync, sync_in_progress
 
 log = logging.getLogger(__name__)
 _registered = False
 
 
 async def sync_job() -> None:
+    if sync_in_progress():
+        log.info("上一轮同步仍在进行，跳过本轮定时同步")
+        return
     await run_sync()
     await sync_group_audience_options()
 

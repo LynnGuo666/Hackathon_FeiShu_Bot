@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from ...core.card_kit import result_card
@@ -16,6 +17,15 @@ from ...core.service import SVC
 
 log = logging.getLogger(__name__)
 
+# 同一选手的积分读改写串行化（B3）：防止并发加分互相覆盖总分
+_score_locks: dict[str, asyncio.Lock] = {}
+_score_locks_guard = asyncio.Lock()
+
+
+async def _score_lock(contestant_record_id: str) -> asyncio.Lock:
+    async with _score_locks_guard:
+        return _score_locks.setdefault(contestant_record_id, asyncio.Lock())
+
 
 async def add_score(contestant_record_id: str, delta: int, reason: str) -> int:
     """写积分流水并更新选手表总分，返回变动后总分。
@@ -23,11 +33,13 @@ async def add_score(contestant_record_id: str, delta: int, reason: str) -> int:
     读改写用选手粒度锁串行化（B3），防止并发加分互相覆盖总分。
     """
     contestants = SVC.contestants
-    me = await contestants.get(contestant_record_id)
-    total = me.score if me else 0
-    new_total = total + delta
-    await SVC.scores.add(contestant_record_id, delta, reason, new_total)
-    await contestants.update(contestant_record_id, score=new_total)
+    lock = await _score_lock(contestant_record_id)
+    async with lock:
+        me = await contestants.get(contestant_record_id)
+        total = me.score if me else 0
+        new_total = total + delta
+        await SVC.scores.add(contestant_record_id, delta, reason, new_total)
+        await contestants.update(contestant_record_id, score=new_total)
     return new_total
 
 

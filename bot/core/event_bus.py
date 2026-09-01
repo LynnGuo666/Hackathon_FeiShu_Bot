@@ -17,8 +17,9 @@ _DEDUP_WINDOW = 600
 # 卡片回调幂等：SDK ws 对 CARD 帧不回 ACK，飞书会重推；按「操作者+卡片+动作」去重
 _seen_card_actions: dict[str, float] = {}
 _CARD_DEDUP_WINDOW = 120  # 卡片操作 2 分钟内视为重复（正常点击不会这么密）
-# 去重表容量上限：超出淘汰最旧，防长期运行内存增长
-_DEDUP_MAX_ENTRIES = 5000
+# 去重表容量上限：超出时一次性淘汰到 80%（避免超限后每次插入都全表排序）
+_DEDUP_MAX_ENTRIES = 20000
+_DEDUP_TRIM_TO = 16000
 
 
 def _dedup(event: dict) -> bool:
@@ -40,19 +41,25 @@ def _dedup(event: dict) -> bool:
 
 def _evict_oldest(table: dict[str, float]) -> None:
     if len(table) > _DEDUP_MAX_ENTRIES:
-        for k in sorted(table, key=table.get)[:len(table) - _DEDUP_MAX_ENTRIES]:
+        for k in sorted(table, key=table.get)[:len(table) - _DEDUP_TRIM_TO]:
             table.pop(k, None)
 
 
 def _card_dedup(ctx) -> bool:
-    """卡片回调幂等：同一操作者对同一张卡片的同一动作，2 分钟内只处理一次。
+    """卡片回调幂等：同一操作者对同一张卡片的同一按钮，2 分钟内只处理一次。
 
     背景：lark-oapi ws 对卡片帧不回 ACK，飞书会重推卡片回调，导致一次点击多次执行。
+    去重键含完整按钮参数（如 project_record_id）：同卡片上点不同项目按钮不算重复。
     """
     now = time.time()
     for k in [k for k, ts in _seen_card_actions.items() if now - ts > _CARD_DEDUP_WINDOW]:
         _seen_card_actions.pop(k, None)
-    key = f"{ctx.open_id}:{ctx.message_id}:{ctx.action_value}"
+    value = (ctx.raw.get("action") or {}).get("value")
+    try:
+        value_key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        value_key = ctx.action_value
+    key = f"{ctx.open_id}:{ctx.message_id}:{value_key}"
     if key in _seen_card_actions:
         log.info("重复卡片回调已跳过: %s", key)
         return True

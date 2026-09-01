@@ -8,6 +8,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 import asyncio
 import json
+import os
+import random
+import threading
+import time
 
 from .config import CFG
 
@@ -72,6 +76,88 @@ def client():
     return _CLIENT
 
 
+# ---------- IM/通讯录 API 限流 + 重试 ----------
+# 消息发送、群成员、通讯录接口都有频率限制，千人级突发（集中验证/投票回复/拉群）
+# 会触发限流码；这里统一走令牌桶 + 指数退避重试，避免 429 直接丢回复。
+
+_IM_RETRYABLE_CODES = {99991400, 99991402, 91403, 91499}
+_IM_MAX_RETRIES = 3
+_IM_BASE_DELAY = 0.5
+
+_IM_RATE_LOCK = threading.Lock()
+_IM_RATE_STATE = {"tokens": 20.0, "ts": time.monotonic()}
+
+
+def _im_qps() -> float:
+    try:
+        return max(1.0, float(os.environ.get("FEISHU_IM_QPS", "20")))
+    except ValueError:
+        return 20.0
+
+
+def _im_try_acquire() -> float:
+    """尝试取一个令牌：返回 0 表示已取到，否则返回建议等待秒数。"""
+    qps = _im_qps()
+    with _IM_RATE_LOCK:
+        now = time.monotonic()
+        _IM_RATE_STATE["tokens"] = min(qps, _IM_RATE_STATE["tokens"]
+                                       + (now - _IM_RATE_STATE["ts"]) * qps)
+        _IM_RATE_STATE["ts"] = now
+        if _IM_RATE_STATE["tokens"] >= 1.0:
+            _IM_RATE_STATE["tokens"] -= 1.0
+            return 0.0
+        return (1.0 - _IM_RATE_STATE["tokens"]) / qps
+
+
+def _im_acquire_slot() -> None:
+    while True:
+        wait = _im_try_acquire()
+        if wait <= 0:
+            return
+        time.sleep(wait)
+
+
+async def _im_acquire_slot_async() -> None:
+    while True:
+        wait = _im_try_acquire()
+        if wait <= 0:
+            return
+        await asyncio.sleep(wait)
+
+
+def _im_retryable(code) -> bool:
+    try:
+        return int(code) in _IM_RETRYABLE_CODES
+    except (TypeError, ValueError):
+        return False
+
+
+def _im_call_sync(call):
+    """同步调用（运行在线程池里）：取限流令牌 + 限流码指数退避重试，返回 resp。"""
+    _im_acquire_slot()
+    resp = None
+    for attempt in range(_IM_MAX_RETRIES + 1):
+        resp = call()
+        code = getattr(resp, "code", None)
+        if code == 0 or code is None or not _im_retryable(code) or attempt >= _IM_MAX_RETRIES:
+            return resp
+        time.sleep(_IM_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.2))
+    return resp
+
+
+async def _im_call(call):
+    """async 包装：限流 + 重试，SDK 同步调用经 to_thread 移出事件循环。"""
+    await _im_acquire_slot_async()
+    resp = None
+    for attempt in range(_IM_MAX_RETRIES + 1):
+        resp = await asyncio.to_thread(call)
+        code = getattr(resp, "code", None)
+        if code == 0 or code is None or not _im_retryable(code) or attempt >= _IM_MAX_RETRIES:
+            return resp
+        await asyncio.sleep(_IM_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.2))
+    return resp
+
+
 async def send_text(open_id: str, text: str) -> None:
     """私聊发送文本消息。"""
     import lark_oapi as lark
@@ -85,10 +171,7 @@ async def send_text(open_id: str, text: str) -> None:
                          .build())
            .build())
 
-    def _do():
-        return client().im.v1.message.create(req)
-
-    resp = await asyncio.to_thread(_do)
+    resp = await _im_call(lambda: client().im.v1.message.create(req))
     if not resp.success():
         raise RuntimeError(f"发消息失败: {resp.code} {resp.msg}")
 
@@ -106,13 +189,25 @@ async def send_card(open_id: str, card: dict) -> str | None:
                          .build())
            .build())
 
-    def _do():
-        return client().im.v1.message.create(req)
-
-    resp = await asyncio.to_thread(_do)
+    resp = await _im_call(lambda: client().im.v1.message.create(req))
     if not resp.success():
         raise RuntimeError(f"发卡片失败: {resp.code} {resp.msg}")
     return resp.data.message_id
+
+
+async def edit_card(message_id: str, card: dict) -> None:
+    """编辑已发出的卡片消息内容（im/v1/messages PATCH，用于验证卡片超时过期）。"""
+    from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+    req = (PatchMessageRequest.builder()
+           .message_id(message_id)
+           .request_body(PatchMessageRequestBody.builder()
+                         .content(json.dumps(card, ensure_ascii=False))
+                         .build())
+           .build())
+    resp = await _im_call(lambda: client().im.v1.message.patch(req))
+    if not resp.success():
+        raise RuntimeError(f"编辑卡片失败: {resp.code} {resp.msg}")
 
 
 async def update_card(token: str, card: dict) -> None:
@@ -127,7 +222,14 @@ async def update_card(token: str, card: dict) -> None:
                      "Authorization": f"Bearer {_tenant_token()}"})
         return json.load(urllib.request.urlopen(req, timeout=10))
 
-    resp = await asyncio.to_thread(_do)
+    await _im_acquire_slot_async()
+    resp = None
+    for attempt in range(_IM_MAX_RETRIES + 1):
+        resp = await asyncio.to_thread(_do)
+        code = resp.get("code")
+        if code in (0, None) or not _im_retryable(code) or attempt >= _IM_MAX_RETRIES:
+            break
+        await asyncio.sleep(_IM_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.2))
     if resp.get("code") not in (0, None):
         raise RuntimeError(f"更新卡片失败: {resp.get('code')} {resp.get('msg')}")
 
@@ -162,7 +264,7 @@ def get_user_phone(open_id: str) -> str | None:
     from lark_oapi.api.contact.v3 import GetUserRequest
 
     req = GetUserRequest.builder().user_id(open_id).user_id_type("open_id").build()
-    resp = client().contact.v3.user.get(req)
+    resp = _im_call_sync(lambda: client().contact.v3.user.get(req))
     if not resp.success():
         raise RuntimeError(f"读取用户信息失败: {resp.code} {resp.msg}（可能缺手机号权限或不在应用可见范围）")
     return getattr(resp.data.user, "mobile", None)
@@ -179,7 +281,7 @@ def resolve_open_ids_by_phones(phones: list[str]) -> dict[str, str]:
                .user_id_type("open_id")
                .request_body({"mobiles": ps[i:i + 100]})
                .build())
-        resp = client().contact.v3.user.batch_get_id(req)
+        resp = _im_call_sync(lambda: client().contact.v3.user.batch_get_id(req))
         if not resp.success():
             raise RuntimeError(f"手机号查询失败: {resp.code} {resp.msg}")
         for u in (resp.data.user_list or []):
@@ -202,7 +304,7 @@ def list_member_ids(chat_id: str) -> set[str]:
              .chat_id(chat_id).member_id_type("open_id").page_size(100))
         if page_token:
             b = b.page_token(page_token)
-        resp = client().im.v1.chat_members.get(b.build())
+        resp = _im_call_sync(lambda: client().im.v1.chat_members.get(b.build()))
         if not resp.success():
             raise RuntimeError(f"读取群成员失败: {resp.code} {resp.msg}")
         for m in (resp.data.items or []):
@@ -239,12 +341,12 @@ def update_group_restrictions(chat_id: str,
         body = UpdateChatRequestBody.builder()
         for field in fields:
             body = getattr(body, field)(merged[field])
-        return client().im.v1.chat.update(
+        return _im_call_sync(lambda: client().im.v1.chat.update(
             UpdateChatRequest.builder()
             .chat_id(chat_id)
             .user_id_type("open_id")
             .request_body(body.build())
-            .build())
+            .build()))
 
     resp = update_chat_fields(_CHAT_RESTRICTION_FIELDS)
     if (not resp.success() and str(resp.code) == "232078"
@@ -260,12 +362,12 @@ def update_group_restrictions(chat_id: str,
     moderation_body = (UpdateChatModerationRequestBody.builder()
                        .moderation_setting(merged["moderation_setting"])
                        .build())
-    moderation_resp = client().im.v1.chat_moderation.update(
+    moderation_resp = _im_call_sync(lambda: client().im.v1.chat_moderation.update(
         UpdateChatModerationRequest.builder()
         .chat_id(chat_id)
         .user_id_type("open_id")
         .request_body(moderation_body)
-        .build())
+        .build()))
     if not moderation_resp.success():
         raise RuntimeError(
             "群基础限制已更新，但发言权限设置失败: "
@@ -296,7 +398,8 @@ def create_group(name: str, owner_open_id: str, member_open_ids: list[str],
         # External groups require a human owner; make the creating bot an admin
         # so it can invite members after creation.
         request = request.set_bot_manager(True)
-    resp = client().im.v1.chat.create(request.request_body(body.build()).build())
+    resp = _im_call_sync(lambda: client().im.v1.chat.create(
+        request.request_body(body.build()).build()))
     if not resp.success():
         raise RuntimeError(f"建群失败: {resp.code} {resp.msg}")
     chat_id = resp.data.chat_id
@@ -312,7 +415,8 @@ def disband_group(chat_id: str) -> None:
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import DeleteChatRequest
 
-    resp = client().im.v1.chat.delete(DeleteChatRequest.builder().chat_id(chat_id).build())
+    resp = _im_call_sync(lambda: client().im.v1.chat.delete(
+        DeleteChatRequest.builder().chat_id(chat_id).build()))
     if not resp.success():
         raise RuntimeError(f"解散群失败: {resp.code} {resp.msg}")
 
@@ -327,7 +431,7 @@ def add_members(chat_id: str, open_ids: list[str]) -> tuple[int, str | None]:
            .member_id_type("open_id")
            .request_body(CreateChatMembersRequestBody.builder().id_list(open_ids).build())
            .build())
-    resp = client().im.v1.chat_members.create(req)
+    resp = _im_call_sync(lambda: client().im.v1.chat_members.create(req))
     if not resp.success():
         return 0, f"{resp.code} {resp.msg}"
     failed = [r.fail for r in (resp.data.invalid_id_list or []) if r and r.fail]
