@@ -106,6 +106,8 @@ def merge_contestants(registrations: list[Registration]) -> dict[str, dict]:
             pick("专业", app["major"])
             pick("年级", app["grade"])
             pick("身份", app["identity"])
+            # 报名记录ID：主报名人行优先（选手表回溯报名用）
+            pick("报名记录ID", record_id)
             if is_owner or not p.get("意向角色"):
                 p["意向角色"] = app["intent"]
             # 审核状态：任一队伍「审核通过」即通过；否则任一「审核不通过」即不通过；否则未审核
@@ -180,6 +182,8 @@ async def _run_sync_impl() -> dict:
             row["identity"] = p["身份"]
         if p.get("意向角色"):
             row["intent_roles"] = p["意向角色"]
+        if p.get("报名记录ID"):
+            row["reg_record_id"] = p["报名记录ID"]
         old = by_phone.get(phone)
         if old is not None:
             diff = {k: v for k, v in row.items() if _field_changed(old, k, v)}
@@ -225,8 +229,14 @@ async def _run_sync_impl() -> dict:
         captain = [t["_owner"]] if t["_owner"] else []
         members = list(t["_members"])
         if rid in existing_teams:
-            t_update.append((existing_teams[rid].record_id,
-                             {"captain_ids": captain, "member_ids": members}))
+            # 状态字段只在为空时补写（自愈历史缺口），不覆盖已有值
+            old = existing_teams[rid]
+            patch = {"captain_ids": captain, "member_ids": members}
+            if not old.preformed:
+                patch["preformed"] = t["preformed"]
+            if not old.agree_assign:
+                patch["agree_assign"] = t["agree_assign"]
+            t_update.append((old.record_id, patch))
         else:
             t_create.append({"team_no": t["team_no"], "reg_record_id": t["reg_record_id"],
                              "preformed": t["preformed"], "agree_assign": t["agree_assign"],
