@@ -253,6 +253,28 @@ async def notify_result(
     return f"已通知{role}"
 
 
+async def notify_admin_conflict(record_id: str, change_kind: str, team, people: list[dict], apply: bool) -> str:
+    """Notify configured administrators without changing conflict handling on failure."""
+    if not apply:
+        return "未发送（dry-run）"
+    old_team = team.team_no if team else "无"
+    old_members = ", ".join(team.all_member_ids) if team else "无"
+    new_members = ", ".join(person["phone"] for person in people)
+    message = (
+        "组队登记需管理员确认\n\n"
+        f"登记记录 ID：{record_id}\n冲突类型：{change_kind}\n"
+        f"原队伍：{old_team}\n原成员：{old_members}\n"
+        f"新提交队长：{people[0]['phone']}\n新提交成员：{new_members}"
+    )
+    failures = []
+    for open_id in CFG.admin_open_ids:
+        try:
+            await send_text(open_id, message)
+        except Exception as exc:
+            failures.append(str(exc))
+    return "管理员通知失败：" + "; ".join(failures) if failures else "已通知管理员"
+
+
 async def run(apply: bool) -> int:
     init_services()
     store = BaseStore(CFG.db_base_token)
@@ -332,9 +354,12 @@ async def run(apply: bool) -> int:
             if change_kind not in {"new", "unchanged", "add-members"}:
                 skipped += 1
                 if apply:
+                    notification = await notify_admin_conflict(
+                        record_id, change_kind, matched_team, people, apply=True
+                    )
                     await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
                         "record_id": record_id,
-                        "fields": {STATUS: "需管理员确认", RESULT: f"结构性冲突：{change_kind}"},
+                        "fields": {STATUS: "需管理员确认", RESULT: f"结构性冲突：{change_kind}；{notification}"},
                     }])
                 continue
             for person, contestant in matched_people:
