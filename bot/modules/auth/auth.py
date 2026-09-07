@@ -428,5 +428,5 @@ class AuthPlugin(Plugin):
         REGISTRY.user_command("验证", "授权", "验证身份", plugin=self.name)(handle_verify)
         REGISTRY.on_card("verify_submit", scope="user", plugin=self.name)(handle_verify_submit)
         REGISTRY.on_card("org_verify_submit", scope="user", plugin=self.name)(handle_org_verify_submit)
-        REGISTRY.user_command("绑定", plugin=self.name)(handle_bind)
+        REGISTRY.user_command("绑定", plugin=self.name, accepts_args=True)(handle_bind)
         REGISTRY.job("验证卡片过期检查", 1, plugin=self.name)(expire_cards_job)

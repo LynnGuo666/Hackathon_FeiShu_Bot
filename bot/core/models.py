@@ -16,6 +16,7 @@ class Contestant:
     contestant_no: str = ""        # 选手ID，WY01-XXXX
     name: str = ""
     phone: str = ""                # 归一化手机号（去重键）
+    email: str = ""                # 邮箱
     vx: str = ""
     school: str = ""
     major: str = ""
@@ -68,7 +69,13 @@ class Team:
     preformed: str = ""            # 是否预组队
     agree_assign: str = ""         # 同意统一分配
     captain_ids: list[str] = field(default_factory=list)   # 队长（选手 record_id）
-    member_ids: list[str] = field(default_factory=list)    # 队友（选手 record_id）
+    member_ids: list[str] = field(default_factory=list)    # 队友（报名产生，选手 record_id）
+    manual_member_ids: list[str] = field(default_factory=list)  # 管理员手动增加的队友
+
+    @property
+    def all_member_ids(self) -> list[str]:
+        """队伍完整成员，按队长、报名队友、手动队友合并去重。"""
+        return list(dict.fromkeys(self.captain_ids + self.member_ids + self.manual_member_ids))
 
 
 @dataclass

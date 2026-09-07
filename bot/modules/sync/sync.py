@@ -226,11 +226,11 @@ async def _run_sync_impl() -> dict:
         members = list(t["_members"])
         if rid in existing_teams:
             t_update.append((existing_teams[rid].record_id,
-                             {"captain_ids": captain, "member_ids": members}))
+                             {"captain_ids": captain, "member_ids": members, "manual_member_ids": existing_teams[rid].manual_member_ids}))
         else:
             t_create.append({"team_no": t["team_no"], "reg_record_id": t["reg_record_id"],
                              "preformed": t["preformed"], "agree_assign": t["agree_assign"],
-                             "captain_ids": captain, "member_ids": members})
+                             "captain_ids": captain, "member_ids": members, "manual_member_ids": []})
     if t_create:
         await SVC.teams.create_many(t_create)
     if t_update:

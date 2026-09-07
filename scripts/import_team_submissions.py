@@ -30,6 +30,9 @@ STATUS = "导入状态"
 RESULT = "导入结果"
 VERIFIED = "已验证"
 FRESHMAN = "大一"
+CONFIRMED = "已确认，待处理"
+_submission_run_lock = asyncio.Lock()
+_submission_confirmation_lock = asyncio.Lock()
 FORM_FIELDS = {
     "captain": ("队长姓名", "队长手机号（自动校验）", "队长邮箱"),
     "teammate_count": "队伍人数",
@@ -138,7 +141,7 @@ def _validate_team_eligibility(people: list[dict], contestants_by_phone: dict) -
 def classify_team_change(new_member_ids: list[str], captain_id: str, teams: list) -> tuple[str, object | None]:
     """Classify a new submission against teams sharing one or more members."""
     new_members = set(new_member_ids)
-    matches = [team for team in teams if new_members & set(team.all_member_ids)]
+    matches = _teams_sharing_members(new_members, teams)
     if not matches:
         return "new", None
     if len(matches) != 1:
@@ -154,6 +157,10 @@ def classify_team_change(new_member_ids: list[str], captain_id: str, teams: list
     if new_members < old_members:
         return "members-removed", team
     return "members-replaced", team
+
+
+def _teams_sharing_members(member_ids: set[str], teams: list) -> list:
+    return [team for team in teams if member_ids & set(team.all_member_ids)]
 
 
 def _parse_submission(record: dict) -> list[dict]:
@@ -253,17 +260,21 @@ async def notify_result(
     return f"已通知{role}"
 
 
-async def notify_admin_conflict(record_id: str, change_kind: str, team, people: list[dict], apply: bool) -> str:
+async def notify_admin_conflict(record_id: str, change_kind: str, teams: list, people: list[dict], apply: bool) -> str:
     """Notify configured administrators without changing conflict handling on failure."""
     if not apply:
         return "未发送（dry-run）"
-    old_team = team.team_no if team else "无"
-    old_members = ", ".join(team.all_member_ids) if team else "无"
+    old_teams = ", ".join(
+        f"{team.record_id} ({team.team_no or '无队伍编号'})" for team in teams
+    ) or "无"
+    old_members = "; ".join(
+        f"{team.record_id}: {', '.join(team.all_member_ids)}" for team in teams
+    ) or "无"
     new_members = ", ".join(person["phone"] for person in people)
     message = (
         "组队登记需管理员确认\n\n"
         f"登记记录 ID：{record_id}\n冲突类型：{change_kind}\n"
-        f"原队伍：{old_team}\n原成员：{old_members}\n"
+        f"原队伍记录 ID：{old_teams}\n原成员：{old_members}\n"
         f"新提交队长：{people[0]['phone']}\n新提交成员：{new_members}"
     )
     failures = []
@@ -276,6 +287,24 @@ async def notify_admin_conflict(record_id: str, change_kind: str, team, people: 
 
 
 async def run(apply: bool) -> int:
+    """Serialize scans so a scheduler run and an approval cannot write twice."""
+    async with _submission_run_lock:
+        return await _run(apply)
+
+
+def _confirmed_team_target(captain_id: str, change_kind: str, matched_team, teams):
+    """Choose the approved target; multi-team cases follow the new captain's team."""
+    if change_kind != "multi-team-match":
+        if matched_team is None:
+            raise ValueError("无法唯一匹配需要更新的原队伍")
+        return matched_team
+    captain_teams = [team for team in teams if captain_id in team.all_member_ids]
+    if len(captain_teams) != 1:
+        raise ValueError("新队长无法唯一匹配原队伍，仍需管理员确认")
+    return captain_teams[0]
+
+
+async def _run(apply: bool) -> int:
     init_services()
     store = BaseStore(CFG.db_base_token)
     submissions = await asyncio.to_thread(store.list_records, TBL_SUBMISSIONS)
@@ -323,6 +352,7 @@ async def run(apply: bool) -> int:
             people = _parse_submission(record)
             matched_people = _match_team_members(people, contestants_by_phone)
             member_ids = [contestant.record_id for _, contestant in matched_people]
+            matched_teams = _teams_sharing_members(set(member_ids), teams)
             change_kind, matched_team = classify_team_change(
                 member_ids, member_ids[0], teams
             )
@@ -335,6 +365,44 @@ async def run(apply: bool) -> int:
                     }])
                 continue
             person_ids = _validate_matched_team_eligibility(matched_people)
+            if status == CONFIRMED:
+                if change_kind == "multi-team-match":
+                    skipped += 1
+                    if apply:
+                        await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
+                            "record_id": record_id,
+                            "fields": {
+                                STATUS: "需管理员确认",
+                                RESULT: "多个已有队伍包含本次成员，保留待管理员人工处理",
+                            },
+                        }])
+                    continue
+                target = _confirmed_team_target(
+                    member_ids[0], change_kind, matched_team, teams
+                )
+                if apply:
+                    updates = [(
+                        target.record_id,
+                        {"captain_ids": [member_ids[0]], "member_ids": member_ids[1:],
+                         "manual_member_ids": []},
+                    )]
+                    await SVC.teams.batch_update(updates)
+                    notification = await notify_result(
+                        people,
+                        contestants_by_phone,
+                        "完成验证 ✅\n\n组队成功！",
+                        apply=True,
+                        fallback_to_teammate=False,
+                    )
+                    await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
+                        "record_id": record_id,
+                        "fields": {
+                            STATUS: "已导入",
+                            RESULT: f"已更新 {target.team_no or target.record_id}；{notification}",
+                        },
+                    }])
+                imported += 1
+                continue
             if change_kind == "add-members":
                 if apply:
                     updated_members = list(dict.fromkeys(
@@ -355,7 +423,7 @@ async def run(apply: bool) -> int:
                 skipped += 1
                 if apply:
                     notification = await notify_admin_conflict(
-                        record_id, change_kind, matched_team, people, apply=True
+                        record_id, change_kind, matched_teams, people, apply=True
                     )
                     await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
                         "record_id": record_id,
@@ -458,6 +526,37 @@ async def run(apply: bool) -> int:
                 }])
     print(f"summary imported={imported} skipped={skipped} failed={failed} apply={apply}")
     return 1 if failed else 0
+
+
+async def confirm_submission(record_id: str) -> str:
+    """Approve once, then process the submission using newly read data."""
+    async with _submission_confirmation_lock:
+        return await _confirm_submission(record_id)
+
+
+async def _confirm_submission(record_id: str) -> str:
+    """Re-read a pending record before allowing its administrator-confirmed retry."""
+    init_services()
+    store = BaseStore(CFG.db_base_token)
+    records = await asyncio.to_thread(store.list_records, TBL_SUBMISSIONS)
+    record = next((item for item in records if item.get("record_id") == record_id), None)
+    if record is None:
+        raise ValueError("未找到该组队登记")
+    fields = record.get("fields") or {}
+    if _text(fields.get(STATUS)) != "需管理员确认":
+        return "该登记无需确认或已处理"
+    await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
+        "record_id": record_id,
+        "fields": {STATUS: CONFIRMED, RESULT: "管理员已确认，等待最新数据处理"},
+    }])
+    exit_code = await run(apply=True)
+    latest_records = await asyncio.to_thread(store.list_records, TBL_SUBMISSIONS)
+    latest = next((item for item in latest_records if item.get("record_id") == record_id), {})
+    if _text((latest.get("fields") or {}).get(STATUS)) == "需管理员确认":
+        return "已确认组队登记，但检测到多队归属，已保留待管理员人工处理"
+    if exit_code:
+        return "已确认组队登记，但最新数据处理失败，请查看导入结果"
+    return "已确认组队登记；已按最新数据处理"
 
 
 def main() -> None:

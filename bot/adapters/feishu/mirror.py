@@ -203,6 +203,23 @@ class Mirror:
             if o.binding_code:
                 self._organizers_by_code[o.binding_code] = o
 
+    def apply_team_update(self, rid: str, fields: dict) -> None:
+        """队伍写入成功后同步镜像，避免后续读到旧成员关系。"""
+        with self._lock:
+            team = self._teams_by_rid.get(rid)
+            if team is None:
+                return
+            for key, value in fields.items():
+                setattr(team, key, list(value) if isinstance(value, list) else value)
+
+    def apply_team_create(self, rid: str, fields: dict) -> None:
+        """同步镜像中的新建队伍。"""
+        with self._lock:
+            self._teams_by_rid[rid] = Team(record_id=rid, **{
+                key: list(value) if isinstance(value, list) else value
+                for key, value in fields.items()
+            })
+
     def apply_vote_add(self, voter_rid: str, project_rid: str) -> None:
         with self._lock:
             self._votes_by_voter.setdefault(voter_rid, set()).add(project_rid)
@@ -250,6 +267,7 @@ def _to_contestant(rec: dict) -> Contestant:
         contestant_no=cells.text(f.get(F.C_NO)),
         name=cells.text(f.get(F.C_NAME)),
         phone=cells.text(f.get(F.C_PHONE)),
+        email=cells.text(f.get(F.C_EMAIL)),
         vx=cells.text(f.get(F.C_VX)),
         school=cells.text(f.get(F.C_SCHOOL)),
         major=cells.text(f.get(F.C_MAJOR)),
@@ -263,7 +281,6 @@ def _to_contestant(rec: dict) -> Contestant:
         msg_count=cells.to_int(f.get(F.C_MSG_COUNT)),
         score=cells.to_int(f.get(F.C_SCORE)),
     )
-
 
 def _to_organizer(rec: dict) -> Organizer:
     f = rec.get("fields") or {}
@@ -288,6 +305,7 @@ def _to_team(rec: dict) -> Team:
         agree_assign=cells.select_one(f.get(F.T_AGREE_ASSIGN)),
         captain_ids=cells.link_ids(f.get(F.T_CAPTAIN)),
         member_ids=cells.link_ids(f.get(F.T_MEMBERS)),
+        manual_member_ids=cells.link_ids(f.get(F.T_MANUAL_MEMBERS)),
     )
 
 

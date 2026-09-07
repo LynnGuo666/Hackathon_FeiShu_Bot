@@ -26,6 +26,7 @@ from .core.registry import REGISTRY, MsgCtx
 from .modules.admin import AdminJobsPlugin, AdminPlugin
 from .modules.group.group import GroupPlugin
 from .modules.sync.sync import SyncPlugin
+from .modules.team_submission import TeamSubmissionPlugin
 from .modules.user import (ActivityPlugin, AuthPlugin, ProfilePlugin,
                            ScorePlugin, VotePlugin)
 
@@ -144,6 +145,7 @@ def setup_plugins() -> None:
     """登记并启用全部插件（依赖序）。新增功能插件在此追加一行即可。"""
     PLUGIN_MANAGER.register(
         SyncPlugin(),
+        TeamSubmissionPlugin(),
         GroupPlugin(),
         VotePlugin(),
         ScorePlugin(),

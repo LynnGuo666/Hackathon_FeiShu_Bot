@@ -25,12 +25,12 @@ async def _team_lines(my_rid: str, name_by_rid: dict[str, str]) -> list[str]:
     lines = []
     for t in await SVC.teams.list_all():
         captain_ids = t.captain_ids
-        member_ids = t.member_ids
+        member_ids = t.all_member_ids
         is_captain = my_rid in captain_ids
         is_member = my_rid in member_ids
         if not (is_captain or is_member):
             continue
-        mates = [name_by_rid.get(r, "?") for r in captain_ids + member_ids if r != my_rid]
+        mates = [name_by_rid.get(r, "?") for r in member_ids if r != my_rid]
         role = "队长" if is_captain else "队员"
         tid = t.team_no or t.record_id
         lines.append(f"- **{tid}**（{role}）" + (f"：{'、'.join(mates)}" if mates else "：暂无其他成员"))
@@ -41,7 +41,7 @@ async def _team_contains_me(team_rids: list[str], my_rid: str) -> bool:
     for t in await SVC.teams.list_all():
         if t.record_id not in team_rids:
             continue
-        if my_rid in t.captain_ids + t.member_ids:
+        if my_rid in t.all_member_ids:
             return True
     return False
 

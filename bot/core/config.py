@@ -36,7 +36,16 @@ class Config:
     sync_interval_minutes: int = field(default_factory=lambda: int(_env("SYNC_INTERVAL_MINUTES", "10") or 10))
     # 自动补拉间隔（分钟）：把已验证选手补进缺失的群（含新增群）；0 = 禁用
     backfill_interval_minutes: int = field(default_factory=lambda: int(_env("BACKFILL_INTERVAL_MINUTES", "30") or 30))
-    admin_open_ids: list[str] = field(default_factory=lambda: [x for x in _env("ADMIN_OPEN_IDS").split(",") if x])
+    # 组队登记出现结构性冲突时的通知对象；可在 .env 中用逗号分隔覆盖。
+    admin_open_ids: list[str] = field(default_factory=lambda: [
+        x for x in _env(
+            "ADMIN_OPEN_IDS",
+            "ou_37995518aa74b508e6a7b67db7151692",
+        ).split(",") if x
+    ])
+    team_submission_interval_minutes: int = field(
+        default_factory=lambda: int(_env("TEAM_SUBMISSION_INTERVAL_MINUTES", "1") or 1)
+    )
     # 是否允许企业外用户使用机器人（external 用户不在通讯录，无法读手机号，验证必然失败）
     allow_external_users: bool = field(default_factory=lambda: _env("ALLOW_EXTERNAL_USERS", "0") == "1")
     # 本租户 tenant_key（启动时自动获取，用于识别外部用户）

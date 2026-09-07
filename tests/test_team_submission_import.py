@@ -8,9 +8,12 @@ from scripts.import_team_submissions import (
     _validate_team_eligibility,
     choose_notification_recipient,
     classify_team_change,
+    confirm_submission,
     notify_result,
+    notify_admin_conflict,
     run,
 )
+from bot.core.registry import REGISTRY
 
 
 def contestant(
@@ -27,6 +30,105 @@ def contestant(
 
 
 class TeamSubmissionImportTests(unittest.TestCase):
+    def test_team_submission_plugin_registers_the_automatic_apply_job(self):
+        """New submissions are scanned through the bot scheduler, not manually only."""
+        from bot.modules.team_submission import TeamSubmissionPlugin
+
+        REGISTRY.unregister_plugin("team_submission")
+        TeamSubmissionPlugin().setup()
+        try:
+            jobs = {
+                name: (interval, handler)
+                for name, interval, handler in REGISTRY.jobs
+                if name == "组队登记自动判断"
+            }
+            self.assertIn("组队登记自动判断", jobs)
+            self.assertEqual(jobs["组队登记自动判断"][0], 1)
+        finally:
+            REGISTRY.unregister_plugin("team_submission")
+
+    def test_confirmed_conflict_updates_the_matching_existing_team(self):
+        """Approval re-reads the record, replaces one old team, and notifies its captain."""
+        record = {
+            "record_id": "rec-confirm-001",
+            "fields": {
+                "导入状态": "需管理员确认",
+                "队长姓名": "新队长",
+                "队长手机号（自动校验）": "13800000000",
+                "队长邮箱": "captain@example.com",
+                "队伍人数": 2,
+                "队友1姓名": "队友一",
+                "队友1手机号": "13900000000",
+                "队友1邮箱": "member1@example.com",
+                "队友2姓名": "队友二",
+                "队友2手机号": "13700000000",
+                "队友2邮箱": "member2@example.com",
+            },
+        }
+
+        class Store:
+            def list_records(self, _):
+                return [record]
+
+            def batch_update(self, _, items):
+                for item in items:
+                    record["fields"].update(item["fields"])
+
+        store = Store()
+        target = types.SimpleNamespace(
+                record_id="team-1", team_no="T-1", reg_record_id="",
+                captain_ids=["c1"], member_ids=["c2", "c4"],
+                manual_member_ids=[], all_member_ids=["c1", "c2", "c4"],
+            )
+        teams = types.SimpleNamespace(
+            list_all=AsyncMock(return_value=[target]),
+            batch_update=AsyncMock(),
+            create_many=AsyncMock(),
+        )
+        service = types.SimpleNamespace(
+            contestants=types.SimpleNamespace(list_all=AsyncMock(return_value=[
+                contestant("c1", "13800000000", open_id="ou_captain", grade="大一", email="captain@example.com"),
+                contestant("c2", "13900000000", email="member1@example.com"),
+                contestant("c3", "13700000000", email="member2@example.com"),
+            ])),
+            teams=teams,
+        )
+
+        with (
+            patch("scripts.import_team_submissions.init_services"),
+            patch("scripts.import_team_submissions.BaseStore", return_value=store),
+            patch("scripts.import_team_submissions.SVC", service),
+            patch("scripts.import_team_submissions.send_text", new_callable=AsyncMock) as send_text,
+        ):
+            outcome = asyncio.run(confirm_submission("rec-confirm-001"))
+
+        self.assertIn("已按最新数据处理", outcome)
+        teams.batch_update.assert_awaited_once_with([("team-1", {
+            "captain_ids": ["c1"], "member_ids": ["c2", "c3"],
+            "manual_member_ids": [],
+        })])
+        self.assertEqual(record["fields"]["导入状态"], "已导入")
+        send_text.assert_awaited_once_with("ou_captain", "完成验证 ✅\n\n组队成功！")
+
+    def test_conflict_notification_includes_all_original_team_record_ids(self):
+        teams = [
+            types.SimpleNamespace(record_id="team-1", team_no="T-1", all_member_ids=["c1"]),
+            types.SimpleNamespace(record_id="team-2", team_no="T-2", all_member_ids=["c2"]),
+        ]
+        with (
+            patch.object(__import__("scripts.import_team_submissions", fromlist=["CFG"]).CFG,
+                         "admin_open_ids", ["ou_admin"]),
+            patch("scripts.import_team_submissions.send_text", new_callable=AsyncMock) as send_text,
+        ):
+            asyncio.run(notify_admin_conflict(
+                "rec-conflict", "multi-team-match", teams,
+                [{"phone": "13800000000"}], apply=True,
+            ))
+
+        message = send_text.await_args.args[1]
+        self.assertIn("team-1 (T-1)", message)
+        self.assertIn("team-2 (T-2)", message)
+
     def test_classifies_every_existing_team_relationship(self):
         team = types.SimpleNamespace(
             captain_ids=["c1"], all_member_ids=["c1", "c2"], team_no="T-1"

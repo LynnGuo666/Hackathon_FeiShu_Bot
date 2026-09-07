@@ -26,6 +26,7 @@ CONTESTANT = TableMap(fields={
     "contestant_no": F.C_NO,
     "name": F.C_NAME,
     "phone": F.C_PHONE,
+    "email": F.C_EMAIL,
     "vx": F.C_VX,
     "school": F.C_SCHOOL,
     "major": F.C_MAJOR,
@@ -59,8 +60,9 @@ TEAM = TableMap(
         "agree_assign": F.T_AGREE_ASSIGN,
         "captain_ids": F.T_CAPTAIN,
         "member_ids": F.T_MEMBERS,
+        "manual_member_ids": F.T_MANUAL_MEMBERS,
     },
-    links=frozenset({"captain_ids", "member_ids"}),
+    links=frozenset({"captain_ids", "member_ids", "manual_member_ids"}),
 )
 
 PROJECT = TableMap(

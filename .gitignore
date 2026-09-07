@@ -6,3 +6,10 @@ data/
 # AI IDE
 .claude/
 .zcode/
+
+# SKILL
+.AGENTS.md
+.spec.md
+.domain.md
+.issue-labels.md
+.triage-labels.md

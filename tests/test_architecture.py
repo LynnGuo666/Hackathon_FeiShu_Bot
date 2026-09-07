@@ -57,6 +57,18 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(_with_retry(flaky, "t"), "ok")
         self.assertEqual(calls["n"], 3)
 
+    def test_retry_on_transient_network_error(self):
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionError("temporary network failure")
+            return "ok"
+
+        self.assertEqual(_with_retry(flaky, "network"), "ok")
+        self.assertEqual(calls["n"], 3)
+
     def test_no_retry_on_other_codes(self):
         calls = {"n": 0}
 
@@ -428,3 +440,27 @@ class AuthDoubleClaimTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+class GroupMemberBatchTests(unittest.TestCase):
+    def test_add_members_deduplicates_and_batches_at_fifty(self):
+        from types import SimpleNamespace
+        from bot.core import lark_client
+
+        captured = []
+        fake_client = unittest.mock.Mock()
+
+        def create(req):
+            captured.append(req.request_body.id_list)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(invalid_id_list=[]),
+            )
+
+        fake_client.im.v1.chat_members.create.side_effect = create
+        ids = [f"ou_{i}" for i in range(120)] + ["ou_0", ""]
+        with unittest.mock.patch.object(lark_client, "client", return_value=fake_client), \
+                unittest.mock.patch.object(lark_client, "_im_call_sync", side_effect=lambda call: call()):
+            ok, error = lark_client.add_members("oc_test", ids)
+
+        self.assertEqual([len(chunk) for chunk in captured], [50, 50, 20])
+        self.assertEqual(ok, 120)
+        self.assertIsNone(error)
