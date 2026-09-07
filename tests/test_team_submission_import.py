@@ -32,7 +32,7 @@ class TeamSubmissionImportTests(unittest.TestCase):
                 "队长姓名": "队长",
                 "队长手机号（自动校验）": "13800000000",
                 "队长邮箱": "captain@example.com",
-                "队友人数": 2,
+                "队伍人数": 2,
                 "队友1姓名": "队友",
                 "队友1手机号": "13900000000",
                 "队友1邮箱": "member@example.com",
@@ -92,7 +92,7 @@ class TeamSubmissionImportTests(unittest.TestCase):
             "队长邮箱": "captain@example.com",
         }
         for count in (0, 1):
-            fields = {**base, "队友人数": count}
+            fields = {**base, "队伍人数": count}
             expected = "总人数必须为3到5人" if count == 0 else "实际填写了0名队友"
             with self.assertRaisesRegex(ValueError, expected):
                 _parse_submission({"fields": fields})
@@ -132,7 +132,7 @@ class TeamSubmissionImportTests(unittest.TestCase):
                 "队长姓名": "队长",
                 "队长手机号（自动校验）": "13800000000",
                 "队长邮箱": "captain@example.com",
-                "队友人数": 2,
+                "队伍人数": 2,
                 "队友1姓名": "队友一",
                 "队友1手机号": "13900000000",
                 "队友1邮箱": "member1@example.com",
@@ -182,7 +182,7 @@ class TeamSubmissionImportTests(unittest.TestCase):
                 "队长姓名": "队长",
                 "队长手机号（自动校验）": "13800000000",
                 "队长邮箱": "not-an-email",
-                "队友人数": 2,
+                "队伍人数": 2,
                 "队友1姓名": "队友一",
                 "队友1手机号": "13900000000",
                 "队友1邮箱": "member1@example.com",
@@ -260,7 +260,7 @@ class TeamSubmissionImportTests(unittest.TestCase):
                 "队长姓名": "队长",
                 "队长手机号（自动校验）": "13800000000",
                 "队长邮箱": "captain@example.com",
-                "队友人数": 2,
+                "队伍人数": 2,
                 "队友1姓名": "队友一",
                 "队友1手机号": "13900000000",
                 "队友1邮箱": "member1@example.com",

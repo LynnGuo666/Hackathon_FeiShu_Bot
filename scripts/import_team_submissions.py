@@ -32,7 +32,7 @@ VERIFIED = "已验证"
 FRESHMAN = "大一"
 FORM_FIELDS = {
     "captain": ("队长姓名", "队长手机号（自动校验）", "队长邮箱"),
-    "teammate_count": "队友人数",
+    "teammate_count": "队伍人数",
     "teammate_blob": "队友信息（可选）",
     "teammates": [
         (f"队友{i}姓名", f"队友{i}手机号", f"队友{i}邮箱")
