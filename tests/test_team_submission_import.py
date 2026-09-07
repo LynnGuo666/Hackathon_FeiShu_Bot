@@ -124,8 +124,8 @@ class TeamSubmissionImportTests(unittest.TestCase):
         send_text.assert_not_awaited()
         self.assertEqual(status, "未发送（dry-run）")
 
-    def test_successful_import_never_falls_back_from_captain_to_teammate(self):
-        """The importer seam only sends a success message to the captain."""
+    def test_successful_import_normalizes_contestant_phone_and_notifies_only_captain(self):
+        """The success seam matches formatted contestant phones and never falls back."""
         record = {
             "record_id": "rec-success-001",
             "fields": {
@@ -148,7 +148,7 @@ class TeamSubmissionImportTests(unittest.TestCase):
         service = types.SimpleNamespace(
             contestants=types.SimpleNamespace(
                 list_all=AsyncMock(return_value=[
-                    contestant("c1", "13800000000", open_id="", grade="大一", email="captain@example.com"),
+                    contestant("c1", "+86 138 0000 0000", open_id="", grade="大一", email="captain@example.com"),
                     contestant("c2", "13900000000", open_id="ou_teammate", email="member1@example.com"),
                     contestant("c3", "13700000000", open_id="ou_other", email="member2@example.com"),
                 ])

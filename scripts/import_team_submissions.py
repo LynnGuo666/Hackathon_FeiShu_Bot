@@ -237,7 +237,11 @@ async def run(apply: bool) -> int:
     store = BaseStore(CFG.db_base_token)
     submissions = await asyncio.to_thread(store.list_records, TBL_SUBMISSIONS)
     contestants = await SVC.contestants.list_all()
-    contestants_by_phone = {c.phone: c for c in contestants if c.phone}
+    contestants_by_phone = {}
+    for contestant in contestants:
+        phone = normalize_phone(contestant.phone)
+        if phone:
+            contestants_by_phone[phone] = contestant
     teams = await SVC.teams.list_all()
     team_by_source = {t.reg_record_id: t for t in teams if t.reg_record_id}
     occupied: dict[str, str] = {}
