@@ -135,6 +135,27 @@ def _validate_team_eligibility(people: list[dict], contestants_by_phone: dict) -
     )
 
 
+def classify_team_change(new_member_ids: list[str], captain_id: str, teams: list) -> tuple[str, object | None]:
+    """Classify a new submission against teams sharing one or more members."""
+    new_members = set(new_member_ids)
+    matches = [team for team in teams if new_members & set(team.all_member_ids)]
+    if not matches:
+        return "new", None
+    if len(matches) != 1:
+        return "multi-team-match", None
+    team = matches[0]
+    old_members = set(team.all_member_ids)
+    if captain_id not in set(team.captain_ids):
+        return "captain-changed", team
+    if new_members == old_members:
+        return "unchanged", team
+    if old_members < new_members:
+        return "add-members", team
+    if new_members < old_members:
+        return "members-removed", team
+    return "members-replaced", team
+
+
 def _parse_submission(record: dict) -> list[dict]:
     fields = record.get("fields") or {}
     captain = _read_person(fields, FORM_FIELDS["captain"], "队长")
@@ -255,7 +276,7 @@ async def run(apply: bool) -> int:
         record_id = record.get("record_id", "")
         fields = record.get("fields") or {}
         status = _text(fields.get(STATUS))
-        if status in {"已导入", "已跳过", "导入失败"}:
+        if status in {"已导入", "已跳过", "导入失败", "需管理员确认"}:
             skipped += 1
             continue
         if _is_empty_submission(fields):
@@ -279,11 +300,47 @@ async def run(apply: bool) -> int:
         try:
             people = _parse_submission(record)
             matched_people = _match_team_members(people, contestants_by_phone)
+            member_ids = [contestant.record_id for _, contestant in matched_people]
+            change_kind, matched_team = classify_team_change(
+                member_ids, member_ids[0], teams
+            )
+            if change_kind == "unchanged":
+                skipped += 1
+                if apply:
+                    await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
+                        "record_id": record_id,
+                        "fields": {STATUS: "已跳过", RESULT: "与已有队伍完全一致，无需变更"},
+                    }])
+                continue
+            person_ids = _validate_matched_team_eligibility(matched_people)
+            if change_kind == "add-members":
+                if apply:
+                    updated_members = list(dict.fromkeys(
+                        matched_team.manual_member_ids + [
+                            rid for rid in member_ids if rid not in matched_team.all_member_ids
+                        ]
+                    ))
+                    await SVC.teams.batch_update([(
+                        matched_team.record_id, {"manual_member_ids": updated_members}
+                    )])
+                    await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
+                        "record_id": record_id,
+                        "fields": {STATUS: "已导入", RESULT: f"已为 {matched_team.team_no} 新增队友"},
+                    }])
+                imported += 1
+                continue
+            if change_kind not in {"new", "unchanged", "add-members"}:
+                skipped += 1
+                if apply:
+                    await asyncio.to_thread(store.batch_update, TBL_SUBMISSIONS, [{
+                        "record_id": record_id,
+                        "fields": {STATUS: "需管理员确认", RESULT: f"结构性冲突：{change_kind}"},
+                    }])
+                continue
             for person, contestant in matched_people:
                 owner = occupied.get(contestant.record_id) or reserved.get(contestant.record_id)
                 if owner:
                     raise ValueError(f"{person['phone']} 已属于队伍 {owner}")
-            person_ids = _validate_matched_team_eligibility(matched_people)
 
             if apply:
                 for person, rid in person_ids:

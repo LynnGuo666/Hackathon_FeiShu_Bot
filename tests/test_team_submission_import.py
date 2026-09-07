@@ -7,6 +7,7 @@ from scripts.import_team_submissions import (
     _parse_submission,
     _validate_team_eligibility,
     choose_notification_recipient,
+    classify_team_change,
     notify_result,
     run,
 )
@@ -26,6 +27,26 @@ def contestant(
 
 
 class TeamSubmissionImportTests(unittest.TestCase):
+    def test_classifies_every_existing_team_relationship(self):
+        team = types.SimpleNamespace(
+            captain_ids=["c1"], all_member_ids=["c1", "c2"], team_no="T-1"
+        )
+        other = types.SimpleNamespace(
+            captain_ids=["c4"], all_member_ids=["c4", "c5"], team_no="T-2"
+        )
+        cases = [
+            (["c1", "c2"], "c1", [team], "unchanged"),
+            (["c1", "c2", "c3"], "c1", [team], "add-members"),
+            (["c1"], "c1", [team], "members-removed"),
+            (["c1", "c3"], "c1", [team], "members-replaced"),
+            (["c1", "c2"], "c3", [team], "captain-changed"),
+            (["c1", "c4"], "c1", [team, other], "multi-team-match"),
+        ]
+        for members, captain, teams, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    classify_team_change(members, captain, teams)[0], expected
+                )
     def test_structured_teammates_follow_declared_count(self):
         record = {
             "fields": {
@@ -252,8 +273,8 @@ class TeamSubmissionImportTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         send_text.assert_not_awaited()
 
-    def test_one_team_violation_precedes_later_eligibility_failures(self):
-        """The importer reports an existing team before grade or verification issues."""
+    def test_member_addition_is_not_treated_as_another_team_conflict(self):
+        """A captain retaining all old members may add teammates."""
         record = {
             "record_id": "rec-order-001",
             "fields": {
@@ -276,7 +297,7 @@ class TeamSubmissionImportTests(unittest.TestCase):
         service = types.SimpleNamespace(
             contestants=types.SimpleNamespace(
                 list_all=AsyncMock(return_value=[
-                    contestant("c1", "13800000000", open_id="ou_captain"),
+                    contestant("c1", "13800000000", open_id="ou_captain", grade="大一"),
                     contestant("c2", "13900000000"),
                     contestant("c3", "13700000000"),
                 ])
@@ -286,8 +307,11 @@ class TeamSubmissionImportTests(unittest.TestCase):
                     record_id="team-record-1",
                     reg_record_id="",
                     team_no="T-existing",
+                    captain_ids=["c1"],
+                    manual_member_ids=[],
                     all_member_ids=["c1"],
                 )]),
+                batch_update=AsyncMock(),
             ),
         )
 
@@ -302,8 +326,8 @@ class TeamSubmissionImportTests(unittest.TestCase):
         ):
             exit_code = asyncio.run(run(apply=True))
 
-        self.assertEqual(exit_code, 1)
-        self.assertIn("已属于队伍 T-existing", send_text.await_args.args[1])
+        self.assertEqual(exit_code, 0)
+        service.teams.batch_update.assert_awaited_once()
 
 
 if __name__ == "__main__":
