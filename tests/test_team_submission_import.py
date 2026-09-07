@@ -174,6 +174,137 @@ class TeamSubmissionImportTests(unittest.TestCase):
         service.teams.create_many.assert_awaited_once()
         send_text.assert_not_awaited()
 
+    def test_failed_import_keeps_a_contactable_captain_as_the_recipient(self):
+        """A malformed captain field does not discard the captain's open_id."""
+        record = {
+            "record_id": "rec-failure-001",
+            "fields": {
+                "队长姓名": "队长",
+                "队长手机号（自动校验）": "13800000000",
+                "队长邮箱": "not-an-email",
+                "队友人数": 2,
+                "队友1姓名": "队友一",
+                "队友1手机号": "13900000000",
+                "队友1邮箱": "member1@example.com",
+                "队友2姓名": "队友二",
+                "队友2手机号": "13700000000",
+                "队友2邮箱": "member2@example.com",
+            },
+        }
+        store = types.SimpleNamespace(
+            list_records=lambda _: [record],
+            batch_update=lambda *_: None,
+        )
+        service = types.SimpleNamespace(
+            contestants=types.SimpleNamespace(
+                list_all=AsyncMock(return_value=[
+                    contestant("c1", "13800000000", open_id="ou_captain"),
+                    contestant("c2", "13900000000", open_id="ou_teammate"),
+                ])
+            ),
+            teams=types.SimpleNamespace(list_all=AsyncMock(return_value=[])),
+        )
+
+        with (
+            patch("scripts.import_team_submissions.init_services"),
+            patch("scripts.import_team_submissions.BaseStore", return_value=store),
+            patch("scripts.import_team_submissions.SVC", service),
+            patch(
+                "scripts.import_team_submissions.send_text",
+                new_callable=AsyncMock,
+            ) as send_text,
+        ):
+            exit_code = asyncio.run(run(apply=True))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(send_text.await_args.args[0], "ou_captain")
+
+    def test_previously_failed_submission_is_not_notified_again(self):
+        """The importer treats a recorded normal failure as already judged."""
+        record = {
+            "record_id": "rec-failure-002",
+            "fields": {
+                "导入状态": "导入失败",
+                "导入结果": "队伍至少需要一名年级为大一的选手",
+                "队长手机号（自动校验）": "13800000000",
+            },
+        }
+        store = types.SimpleNamespace(
+            list_records=lambda _: [record],
+            batch_update=lambda *_: self.fail("already judged submissions must not be written"),
+        )
+        service = types.SimpleNamespace(
+            contestants=types.SimpleNamespace(list_all=AsyncMock(return_value=[])),
+            teams=types.SimpleNamespace(list_all=AsyncMock(return_value=[])),
+        )
+
+        with (
+            patch("scripts.import_team_submissions.init_services"),
+            patch("scripts.import_team_submissions.BaseStore", return_value=store),
+            patch("scripts.import_team_submissions.SVC", service),
+            patch(
+                "scripts.import_team_submissions.send_text",
+                new_callable=AsyncMock,
+            ) as send_text,
+        ):
+            exit_code = asyncio.run(run(apply=True))
+
+        self.assertEqual(exit_code, 0)
+        send_text.assert_not_awaited()
+
+    def test_one_team_violation_precedes_later_eligibility_failures(self):
+        """The importer reports an existing team before grade or verification issues."""
+        record = {
+            "record_id": "rec-order-001",
+            "fields": {
+                "队长姓名": "队长",
+                "队长手机号（自动校验）": "13800000000",
+                "队长邮箱": "captain@example.com",
+                "队友人数": 2,
+                "队友1姓名": "队友一",
+                "队友1手机号": "13900000000",
+                "队友1邮箱": "member1@example.com",
+                "队友2姓名": "队友二",
+                "队友2手机号": "13700000000",
+                "队友2邮箱": "member2@example.com",
+            },
+        }
+        store = types.SimpleNamespace(
+            list_records=lambda _: [record],
+            batch_update=lambda *_: None,
+        )
+        service = types.SimpleNamespace(
+            contestants=types.SimpleNamespace(
+                list_all=AsyncMock(return_value=[
+                    contestant("c1", "13800000000", open_id="ou_captain"),
+                    contestant("c2", "13900000000"),
+                    contestant("c3", "13700000000"),
+                ])
+            ),
+            teams=types.SimpleNamespace(
+                list_all=AsyncMock(return_value=[types.SimpleNamespace(
+                    record_id="team-record-1",
+                    reg_record_id="",
+                    team_no="T-existing",
+                    all_member_ids=["c1"],
+                )]),
+            ),
+        )
+
+        with (
+            patch("scripts.import_team_submissions.init_services"),
+            patch("scripts.import_team_submissions.BaseStore", return_value=store),
+            patch("scripts.import_team_submissions.SVC", service),
+            patch(
+                "scripts.import_team_submissions.send_text",
+                new_callable=AsyncMock,
+            ) as send_text,
+        ):
+            exit_code = asyncio.run(run(apply=True))
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("已属于队伍 T-existing", send_text.await_args.args[1])
+
 
 if __name__ == "__main__":
     unittest.main()

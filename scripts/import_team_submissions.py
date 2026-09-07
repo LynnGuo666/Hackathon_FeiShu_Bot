@@ -4,7 +4,7 @@
 默认只做校验和预览；加 --apply 才会写入。
 每条提交对应一条队伍：队长写入「队长」，队友写入「手动队友」，
 这样不会被报名表同步覆盖。只有已存在且已验证的选手才能导入；
-成功或失败后向队长（必要时向第一个可用队友）发送结果消息。
+成功仅向队长发送结果；普通失败时，队长没有可用身份才向首个可用队友兜底。
 """
 from __future__ import annotations
 
@@ -98,8 +98,8 @@ def _is_empty_submission(fields: dict) -> bool:
     )
 
 
-def _validate_team_eligibility(people: list[dict], contestants_by_phone: dict) -> list[tuple[dict, object]]:
-    """提交写入前的资格闸门：必须是已知选手、全员已验证且至少一名大一。"""
+def _match_team_members(people: list[dict], contestants_by_phone: dict) -> list[tuple[dict, object]]:
+    """Match submitted members to contestants before applying eligibility gates."""
     matched = []
     missing = []
     for person in people:
@@ -110,6 +110,13 @@ def _validate_team_eligibility(people: list[dict], contestants_by_phone: dict) -
             matched.append((person, contestant))
     if missing:
         raise ValueError(f"手机号未在选手表找到，无法确认入群状态：{', '.join(missing)}")
+    return matched
+
+
+def _validate_matched_team_eligibility(matched: list[tuple[dict, object]]) -> list[tuple[dict, object]]:
+    """Apply the post-membership eligibility gates in the specified order."""
+    if not any(contestant.grade == FRESHMAN for _, contestant in matched):
+        raise ValueError("队伍至少需要一名年级为大一的选手")
 
     unverified = [
         person["phone"]
@@ -118,10 +125,14 @@ def _validate_team_eligibility(people: list[dict], contestants_by_phone: dict) -
     ]
     if unverified:
         raise ValueError(f"队伍中存在未入群选手（验证状态不是已验证）：{', '.join(unverified)}")
-
-    if not any(contestant.grade == FRESHMAN for _, contestant in matched):
-        raise ValueError("队伍至少需要一名年级为大一的选手")
     return [(person, contestant.record_id) for person, contestant in matched]
+
+
+def _validate_team_eligibility(people: list[dict], contestants_by_phone: dict) -> list[tuple[dict, object]]:
+    """Validate submitted members against the contestant eligibility gates."""
+    return _validate_matched_team_eligibility(
+        _match_team_members(people, contestants_by_phone)
+    )
 
 
 def _parse_submission(record: dict) -> list[dict]:
@@ -165,16 +176,22 @@ def choose_notification_recipient(
     return None, None
 
 
+def _best_effort_person(fields: dict, names: tuple[str, str, str]) -> dict | None:
+    """Extract a contactable person even when another submitted field is invalid."""
+    name, phone, email = (_text(fields.get(key)) for key in names)
+    normalized = normalize_phone(phone)
+    if not is_valid_phone(normalized):
+        return None
+    return {"name": name, "phone": normalized, "email": email}
+
+
 def _best_effort_people(record: dict) -> list[dict]:
     """失败时尽量提取手机号，用于向队长或队友发送失败原因。"""
     fields = record.get("fields") or {}
     people = []
-    try:
-        captain = _read_person(fields, FORM_FIELDS["captain"], "队长")
-        if captain:
-            people.append(captain)
-    except ValueError:
-        pass
+    captain = _best_effort_person(fields, FORM_FIELDS["captain"])
+    if captain:
+        people.append(captain)
     try:
         structured = _read_structured_teammates(fields)
     except ValueError:
@@ -234,7 +251,7 @@ async def run(apply: bool) -> int:
         record_id = record.get("record_id", "")
         fields = record.get("fields") or {}
         status = _text(fields.get(STATUS))
-        if status in {"已导入", "已跳过"}:
+        if status in {"已导入", "已跳过", "导入失败"}:
             skipped += 1
             continue
         if _is_empty_submission(fields):
@@ -257,14 +274,12 @@ async def run(apply: bool) -> int:
         team_created = False
         try:
             people = _parse_submission(record)
-            person_ids = _validate_team_eligibility(people, contestants_by_phone)
-            for person, contestant_id in person_ids:
-                contestant = contestants_by_phone[person["phone"]]
+            matched_people = _match_team_members(people, contestants_by_phone)
+            for person, contestant in matched_people:
                 owner = occupied.get(contestant.record_id) or reserved.get(contestant.record_id)
                 if owner:
                     raise ValueError(f"{person['phone']} 已属于队伍 {owner}")
-            if len(people) > 5:
-                raise ValueError("队伍人数不能超过5人")
+            person_ids = _validate_matched_team_eligibility(matched_people)
 
             if apply:
                 for person, rid in person_ids:
