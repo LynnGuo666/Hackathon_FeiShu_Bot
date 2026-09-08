@@ -21,7 +21,18 @@ from ..group.group import verified_users
 from ..sync.sync import run_sync, sync_in_progress
 from ..vote.state import set_vote_open
 
-
+async def handle_confirm_team(ctx: MsgCtx) -> None:
+    parts = ctx.text.split()
+    if len(parts) != 2:
+        await send_text(ctx.open_id, "用法：确认组队 <登记记录ID>")
+        return
+    from scripts.import_team_submissions import confirm_submission
+    try:
+        outcome = await confirm_submission(parts[1])
+    except Exception as exc:
+        await send_text(ctx.open_id, f"确认组队失败：{exc}")
+        return
+    await send_text(ctx.open_id, outcome)
 async def handle_sync(ctx: MsgCtx) -> None:
     if sync_in_progress():
         await send_text(ctx.open_id, "已有同步正在进行，请稍候再试。")
@@ -141,7 +152,8 @@ class AdminPlugin(Plugin):
         REGISTRY.admin_command("管理员", plugin=self.name)(handle_admins)
         REGISTRY.admin_command("补拉", plugin=self.name)(handle_backfill)
         REGISTRY.admin_command("重载数据", plugin=self.name)(handle_reload)
-        REGISTRY.admin_command("建群", plugin=self.name)(handle_create_group)
+        REGISTRY.admin_command("建群", plugin=self.name, accepts_args=True)(handle_create_group)
+        REGISTRY.admin_command("确认组队", plugin=self.name, accepts_args=True)(handle_confirm_team)
         REGISTRY.admin_command("生成绑定码", plugin=self.name)(handle_generate_codes)
         REGISTRY.admin_command("开票", "关票", plugin=self.name)(handle_vote_toggle)
 

@@ -231,7 +231,12 @@ async def _run_sync_impl() -> dict:
         if rid in existing_teams:
             # 状态字段只在为空时补写（自愈历史缺口），不覆盖已有值
             old = existing_teams[rid]
-            patch = {"captain_ids": captain, "member_ids": members}
+            patch = {
+                "captain_ids": captain,
+                "member_ids": members,
+                # 手动成员不被同步覆盖，原样保留
+                "manual_member_ids": old.manual_member_ids,
+            }
             if not old.preformed:
                 patch["preformed"] = t["preformed"]
             if not old.agree_assign:
@@ -240,7 +245,7 @@ async def _run_sync_impl() -> dict:
         else:
             t_create.append({"team_no": t["team_no"], "reg_record_id": t["reg_record_id"],
                              "preformed": t["preformed"], "agree_assign": t["agree_assign"],
-                             "captain_ids": captain, "member_ids": members})
+                             "captain_ids": captain, "member_ids": members, "manual_member_ids": []})
     if t_create:
         await SVC.teams.create_many(t_create)
     if t_update:

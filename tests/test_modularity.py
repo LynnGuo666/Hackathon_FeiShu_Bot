@@ -29,6 +29,20 @@ class RegistryScopeTests(unittest.TestCase):
         self.assertFalse(registry.allows_card("管理员卡片", False))
         self.assertTrue(registry.allows_card("管理员卡片", True))
 
+    def test_only_explicit_argument_commands_match_a_prefix(self):
+        registry = Registry()
+
+        async def handler(_ctx):
+            return None
+
+        registry.admin_command("建群", accepts_args=True)(handler)
+        registry.admin_command("同步")(handler)
+
+        name, resolved = registry.resolve_command("建群 测试群 全部")
+        self.assertEqual(name, "建群")
+        self.assertIs(resolved, handler)
+        self.assertEqual(registry.resolve_command("同步 额外内容"), ("同步 额外内容", None))
+
 
 class FakeOrganizerRepo:
     """duck-typing 假实现：与 FeishuOrganizerRepo 同一方法契约。"""

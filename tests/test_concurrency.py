@@ -6,7 +6,7 @@ import unittest.mock
 from bot.adapters.feishu import field_map
 from bot.adapters.feishu.field_map import encode
 from bot.adapters.feishu.mirror import Mirror
-from bot.core.models import Contestant, Project, ScoreEntry
+from bot.core.models import Contestant, Project, ScoreEntry, Team
 from bot.core.plugin import Plugin, PluginManager
 from bot.core.registry import Registry
 
@@ -118,6 +118,11 @@ class MirrorTests(unittest.TestCase):
         self.mirror.apply_activity_upsert("rec_c1", "2026-09-01", 2)
         self.assertEqual(self.mirror.activity_entry("rec_c1", "2026-09-01").msg_count, 5)
 
+    def test_team_members_include_manual_members_without_duplicates(self):
+        team = Team(captain_ids=["rec_c1"], member_ids=["rec_c2", "rec_c1"],
+                    manual_member_ids=["rec_c3", "rec_c2"])
+        self.assertEqual(team.all_member_ids, ["rec_c1", "rec_c2", "rec_c3"])
+
 
 class WriteThroughTests(unittest.TestCase):
     """仓库写穿透：恰好 1 次 API、镜像同步、字段经映射层翻译。"""
@@ -155,6 +160,23 @@ class WriteThroughTests(unittest.TestCase):
         self.assertEqual(fields["飞书open_id"], "ou_b")
         self.assertEqual(fields["验证状态"], "已验证")
         self.assertEqual(mirror.contestant_by_open_id("ou_b").record_id, "rec_c2")
+
+    def test_team_update_updates_mirror_after_write(self):
+        from bot.adapters.feishu.repos import FeishuTeamRepo
+
+        store = _seed_store()
+        store.tables["队伍表"] = [{
+            "record_id": "rec_t1",
+            "fields": {"队伍ID": "T-0001", "队长": [{"id": "rec_c1"}],
+                        "队友": [], "手动队友": []},
+        }]
+        mirror = Mirror(store)
+        mirror.load()
+        repo = FeishuTeamRepo(mirror)
+
+        asyncio.run(repo.batch_update([("rec_t1", {"manual_member_ids": ["rec_c2"]})]))
+
+        self.assertEqual(mirror.teams_all()[0].manual_member_ids, ["rec_c2"])
 
     def test_concurrent_votes_no_double_write(self):
         """同一用户并发投票：业务锁串行化，只写一票（镜像层端到端）。"""
@@ -265,15 +287,16 @@ class RealPluginAssemblyTests(unittest.TestCase):
     def test_all_plugins_setup_and_teardown(self):
         from bot.main import (ActivityPlugin, AdminJobsPlugin, AdminPlugin,
                               AuthPlugin, GroupPlugin, ProfilePlugin,
-                              ScorePlugin, SyncPlugin, VotePlugin, PLUGIN_MANAGER)
+                              ScorePlugin, SyncPlugin, TeamSubmissionPlugin,
+                              VotePlugin, PLUGIN_MANAGER)
 
         pm = PluginManager()
-        for cls in (SyncPlugin, GroupPlugin, VotePlugin, ScorePlugin,
+        for cls in (SyncPlugin, TeamSubmissionPlugin, GroupPlugin, VotePlugin, ScorePlugin,
                     ActivityPlugin, AuthPlugin, ProfilePlugin,
                     AdminJobsPlugin, AdminPlugin):
             pm.register(cls())
         enabled = pm.setup_all()
-        self.assertEqual(set(enabled), {"sync", "group", "vote", "score", "activity",
+        self.assertEqual(set(enabled), {"sync", "team_submission", "group", "vote", "score", "activity",
                                         "auth", "profile", "admin_jobs", "admin"})
         # 关键指令已注册
         from bot.core.registry import REGISTRY

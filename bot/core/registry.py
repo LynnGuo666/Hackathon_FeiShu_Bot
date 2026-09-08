@@ -54,6 +54,7 @@ class Registry:
     command_scopes: dict[str, CommandScope] = field(default_factory=dict)
     card_scopes: dict[str, CommandScope] = field(default_factory=dict)
     command_chats: dict[str, ChatScope] = field(default_factory=dict)
+    command_accepts_args: dict[str, bool] = field(default_factory=dict)
     # 插件归属：command/card 名 -> 插件名；job 名 -> 插件名（hooks 按插件分组存）
     owners: dict[str, str] = field(default_factory=dict)
     hook_owners: list[tuple[GroupMsgHook, str]] = field(default_factory=list)
@@ -67,7 +68,7 @@ class Registry:
         return deco
 
     def command(self, *names: str, scope: CommandScope = "public", chat: ChatScope = "p2p",
-                plugin: str = ""):
+                plugin: str = "", accepts_args: bool = False):
         """注册文本指令，并声明权限作用域与适用会话（默认仅私聊触发）。"""
         if scope not in ("public", "user", "admin"):
             raise ValueError(f"未知指令作用域: {scope}")
@@ -80,22 +81,39 @@ class Registry:
                 self.commands[name] = fn
                 self.command_scopes[name] = scope
                 self.command_chats[name] = chat
+                self.command_accepts_args[name] = accepts_args
                 if plugin:
                     self.owners[name] = plugin
             return fn
         return deco
 
-    def user_command(self, *names: str, chat: ChatScope = "p2p", plugin: str = ""):
+    def user_command(self, *names: str, chat: ChatScope = "p2p", plugin: str = "",
+                     accepts_args: bool = False):
         """注册用户侧指令。管理员也可以使用用户侧指令。"""
-        return self.command(*names, scope="user", chat=chat, plugin=plugin)
+        return self.command(*names, scope="user", chat=chat, plugin=plugin,
+                            accepts_args=accepts_args)
 
-    def admin_command(self, *names: str, chat: ChatScope = "p2p", plugin: str = ""):
+    def admin_command(self, *names: str, chat: ChatScope = "p2p", plugin: str = "",
+                      accepts_args: bool = False):
         """注册管理员侧指令。事件路由层会统一执行权限校验。"""
-        return self.command(*names, scope="admin", chat=chat, plugin=plugin)
+        return self.command(*names, scope="admin", chat=chat, plugin=plugin,
+                            accepts_args=accepts_args)
 
-    def public_command(self, *names: str, chat: ChatScope = "p2p", plugin: str = ""):
+    def public_command(self, *names: str, chat: ChatScope = "p2p", plugin: str = "",
+                       accepts_args: bool = False):
         """注册无需身份权限的公共指令。"""
-        return self.command(*names, scope="public", chat=chat, plugin=plugin)
+        return self.command(*names, scope="public", chat=chat, plugin=plugin,
+                            accepts_args=accepts_args)
+
+    def resolve_command(self, text: str) -> tuple[str, CommandHandler | None]:
+        """解析完整指令；只有显式声明 accepts_args 的指令才接受尾随参数。"""
+        handler = self.commands.get(text)
+        if handler is not None:
+            return text, handler
+        name = text.split(maxsplit=1)[0] if text else ""
+        if self.command_accepts_args.get(name):
+            return name, self.commands.get(name)
+        return text, None
 
     def allows_command(self, name: str, is_admin: bool) -> bool:
         """判断操作者是否可以执行指令。未声明的旧指令按公共处理。"""
@@ -143,6 +161,7 @@ class Registry:
             self.commands.pop(n, None)
             self.command_scopes.pop(n, None)
             self.command_chats.pop(n, None)
+            self.command_accepts_args.pop(n, None)
         cards = [n for n, owner in self.owners.items() if owner == plugin and n in self.card_actions]
         for n in cards:
             self.card_actions.pop(n, None)

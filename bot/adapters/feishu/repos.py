@@ -145,12 +145,18 @@ class FeishuTeamRepo(_FeishuRepoBase):
     async def create_many(self, rows: list[dict]) -> list[str]:
         encoded = [field_map.encode(self.tmap, r) for r in rows]
         created = await asyncio.to_thread(self._store.batch_create, self.table, encoded)
-        return [r.get("record_id", "") for r in created]
+        rids = [r.get("record_id", "") for r in created]
+        for rid, row in zip(rids, rows):
+            if rid:
+                self._mirror.apply_team_create(rid, row)
+        return rids
 
     async def batch_update(self, items: list[tuple[str, dict]]) -> None:
         encoded = [(rid, field_map.encode(self.tmap, fields)) for rid, fields in items]
         await asyncio.to_thread(self._store.batch_update, self.table,
                                 [{"record_id": rid, "fields": f} for rid, f in encoded])
+        for rid, fields in items:
+            self._mirror.apply_team_update(rid, fields)
 
 
 # ---------- 项目 ----------

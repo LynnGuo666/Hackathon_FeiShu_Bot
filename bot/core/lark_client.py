@@ -391,9 +391,15 @@ def create_group(name: str, owner_open_id: str, member_open_ids: list[str],
             .external(external))
     if external:
         body = body.owner_id(owner_open_id)
-    if member_open_ids:
-        body = body.user_id_list(member_open_ids)
-    request = CreateChatRequest.builder()
+    # 指定群主后飞书会自动将其加入群聊；不要再把同一 ID 放进
+    # user_id_list，否则部分租户会以 232001 拒绝重复的初始成员列表。
+    members = list(dict.fromkeys(
+        open_id for open_id in member_open_ids
+        if open_id and (not external or open_id != owner_open_id)
+    ))
+    if members:
+        body = body.user_id_list(members)
+    request = CreateChatRequest.builder().user_id_type("open_id")
     if external:
         # External groups require a human owner; make the creating bot an admin
         # so it can invite members after creation.
@@ -422,18 +428,28 @@ def disband_group(chat_id: str) -> None:
 
 
 def add_members(chat_id: str, open_ids: list[str]) -> tuple[int, str | None]:
-    """把 open_id 列表拉入群，返回 (成功数, 错误信息)。"""
+    """把 open_id 列表分批拉入群，返回 (成功数, 错误信息)。"""
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import CreateChatMembersRequest, CreateChatMembersRequestBody
 
-    req = (CreateChatMembersRequest.builder()
-           .chat_id(chat_id)
-           .member_id_type("open_id")
-           .request_body(CreateChatMembersRequestBody.builder().id_list(open_ids).build())
-           .build())
-    resp = _im_call_sync(lambda: client().im.v1.chat_members.create(req))
-    if not resp.success():
-        return 0, f"{resp.code} {resp.msg}"
-    failed = [r.fail for r in (resp.data.invalid_id_list or []) if r and r.fail]
-    ok = len(open_ids) - len(failed)
-    return ok, (f"{len(failed)} 人失败: {failed[:3]}" if failed else None)
+    # 飞书“将用户或机器人拉入群聊”接口单次最多接收 50 个用户。
+    # 补拉可能一次命中全部选手，必须在客户端去重并分批提交。
+    unique_ids = list(dict.fromkeys(open_id for open_id in open_ids if open_id))
+    ok_total = 0
+    errors: list[str] = []
+    for offset in range(0, len(unique_ids), 50):
+        chunk = unique_ids[offset:offset + 50]
+        req = (CreateChatMembersRequest.builder()
+               .chat_id(chat_id)
+               .member_id_type("open_id")
+               .request_body(CreateChatMembersRequestBody.builder().id_list(chunk).build())
+               .build())
+        resp = _im_call_sync(lambda req=req: client().im.v1.chat_members.create(req))
+        if not resp.success():
+            errors.append(f"第 {offset // 50 + 1} 批: {resp.code} {resp.msg}")
+            continue
+        failed = [r.fail for r in (resp.data.invalid_id_list or []) if r and r.fail]
+        ok_total += len(chunk) - len(failed)
+        if failed:
+            errors.append(f"第 {offset // 50 + 1} 批 {len(failed)} 人失败: {failed[:3]}")
+    return ok_total, ("；".join(errors) if errors else None)

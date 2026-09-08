@@ -64,7 +64,7 @@ def _is_retryable(code) -> bool:
 
 
 def _with_retry(call, what: str):
-    """对限流/5xx 错误码指数退避重试（0.5s×2ⁿ+抖动，最多 3 次）。
+    """对限流/5xx/临时网络错误指数退避重试（最多 3 次）。
 
     SDK 失败以 RuntimeError("...: <code> <msg>") 抛出，这里解析出错误码判断是否可重试。
     """
@@ -73,10 +73,14 @@ def _with_retry(call, what: str):
     for attempt in range(_MAX_RETRIES + 1):
         try:
             return call()
-        except RuntimeError as e:
+        except Exception as e:
             last = e
             code_num = _error_code_of(e)
-            if attempt >= _MAX_RETRIES or code_num is None or code_num not in _RETRYABLE_CODES:
+            transient_network_error = isinstance(e, (ConnectionError, TimeoutError, OSError)) or e.__class__.__module__.startswith(("requests", "urllib3", "httpx"))
+            if (attempt >= _MAX_RETRIES
+                    or (code_num is None and not transient_network_error)
+                    or (code_num is not None and code_num not in _RETRYABLE_CODES
+                        and not transient_network_error)):
                 raise
             delay = _BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.2)
             time.sleep(delay)
@@ -89,6 +93,13 @@ def _error_code_of(e: RuntimeError) -> int | None:
 
     m = re.search(r":\s*(\d{6,})\b", str(e))
     return int(m.group(1)) if m else None
+
+
+def _require_success(resp, what: str):
+    """把 SDK 的失败响应转成可由 _with_retry 判断的异常。"""
+    if not resp.success():
+        raise RuntimeError(f"{what}失败: {resp.code} {resp.msg}")
+    return resp
 
 
 def _cli(*args: str) -> dict:
@@ -134,10 +145,10 @@ class BaseStore:
         if table not in cache:
             from lark_oapi.api.bitable.v1 import ListAppTableRequest
 
-            resp = _sdk_client().bitable.v1.app_table.list(
-                ListAppTableRequest.builder().app_token(self.base_token).page_size(100).build())
-            if not resp.success():
-                raise RuntimeError(f"解析表名失败: {resp.code} {resp.msg}")
+            resp = _with_retry(lambda: _require_success(
+                _sdk_client().bitable.v1.app_table.list(
+                    ListAppTableRequest.builder().app_token(self.base_token).page_size(100).build()),
+                "解析表名"), "SDK 解析表名")
             for t in (resp.data.items or []):
                 cache[t.name] = t.table_id
             if table not in cache:
@@ -213,10 +224,9 @@ class BaseStore:
                  .user_id_type("open_id"))
             if page_token:
                 b = b.page_token(page_token)
-            resp = _with_retry(lambda: client.bitable.v1.app_table_record.list(b.build()),
-                               "SDK 读取")
-            if not resp.success():
-                raise RuntimeError(f"SDK 读取失败: {resp.code} {resp.msg}")
+            resp = _with_retry(lambda: _require_success(
+                client.bitable.v1.app_table_record.list(b.build()), "SDK 读取"),
+                "SDK 读取")
             records.extend({"record_id": it.record_id, "fields": it.fields} for it in (resp.data.items or []))
             if not resp.data.has_more:
                 break
@@ -234,10 +244,9 @@ class BaseStore:
                .app_token(self.base_token)
                .table_id(self.resolve_table_id(table))
                .request_body(body.build()))
-        resp = _with_retry(lambda: client.bitable.v1.app_table_record.batch_create(req.build()),
-                           "SDK 批量新建")
-        if not resp.success():
-            raise RuntimeError(f"SDK 批量新建失败: {resp.code} {resp.msg}")
+        resp = _with_retry(lambda: _require_success(
+            client.bitable.v1.app_table_record.batch_create(req.build()), "SDK 批量新建"),
+            "SDK 批量新建")
         return [{"record_id": it.record_id, "fields": it.fields} for it in (resp.data.records or [])]
 
     def _sdk_batch_update(self, table: str, items: list[dict]) -> None:
@@ -251,10 +260,9 @@ class BaseStore:
                .app_token(self.base_token)
                .table_id(self.resolve_table_id(table))
                .request_body(body.build()))
-        resp = _with_retry(lambda: client.bitable.v1.app_table_record.batch_update(req.build()),
-                           "SDK 批量更新")
-        if not resp.success():
-            raise RuntimeError(f"SDK 批量更新失败: {resp.code} {resp.msg}")
+        _with_retry(lambda: _require_success(
+            client.bitable.v1.app_table_record.batch_update(req.build()), "SDK 批量更新"),
+            "SDK 批量更新")
 
 
 def _env_backend() -> str:
