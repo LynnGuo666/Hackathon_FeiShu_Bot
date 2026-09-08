@@ -171,6 +171,18 @@ class TeamSubmissionImportTests(unittest.TestCase):
             "13800000000", "13900000000", "13700000000",
         ])
 
+    def test_submission_uses_actual_form_field_names(self):
+        record = {
+            "fields": {
+                "队长": "队长", "队长手机号": "13800000000", "队长邮箱": "captain@example.com",
+                "队友人数": 2,
+                "队友1": "队友一", "队友1手机号": "13900000000", "队友1邮箱": "one@example.com",
+                "队友2": "队友二", "队友2手机号": "13700000000", "队友2邮箱": "two@example.com",
+            }
+        }
+        people = _parse_submission(record)
+        self.assertEqual([person["name"] for person in people], ["队长", "队友一", "队友二"])
+
     def test_notification_prefers_captain_and_falls_back_to_first_teammate(self):
         people = [
             {"phone": "13800000000"},
@@ -201,6 +213,46 @@ class TeamSubmissionImportTests(unittest.TestCase):
         contestants["13900000000"].verify_status = "未验证"
         with self.assertRaisesRegex(ValueError, "存在未入群选手"):
             _validate_team_eligibility(people, contestants)
+
+    def test_eligibility_error_is_checked_before_structural_conflict(self):
+        """An invalid team must not be classified as a captain-change conflict first."""
+        record = {
+            "record_id": "rec-priority-001",
+            "fields": {
+                "队长": "队长", "队长手机号": "13800000000", "队长邮箱": "captain@example.com",
+                "队友人数": 2,
+                "队友1": "队友一", "队友1手机号": "13900000000", "队友1邮箱": "one@example.com",
+                "队友2": "队友二", "队友2手机号": "13700000000", "队友2邮箱": "two@example.com",
+            },
+        }
+        store = types.SimpleNamespace(
+            list_records=lambda _: [record],
+            batch_update=lambda _, items: record["fields"].update(items[0]["fields"]),
+        )
+        service = types.SimpleNamespace(
+            contestants=types.SimpleNamespace(list_all=AsyncMock(return_value=[
+                contestant("c1", "13800000000"),
+                contestant("c2", "13900000000"),
+                contestant("c3", "13700000000"),
+            ])),
+            teams=types.SimpleNamespace(list_all=AsyncMock(return_value=[
+                types.SimpleNamespace(record_id="team-1", team_no="T-1", reg_record_id="", captain_ids=["other"],
+                                      all_member_ids=["c1", "c2", "c3"])
+            ])),
+        )
+
+        with (
+            patch("scripts.import_team_submissions.init_services"),
+            patch("scripts.import_team_submissions.BaseStore", return_value=store),
+            patch("scripts.import_team_submissions.SVC", service),
+            patch("scripts.import_team_submissions.classify_team_change",
+                  wraps=classify_team_change) as classify,
+        ):
+            self.assertEqual(asyncio.run(run(apply=True)), 1)
+
+        classify.assert_not_called()
+        self.assertEqual(record["fields"]["导入状态"], "导入失败")
+        self.assertIn("至少需要一名年级为大一", record["fields"]["导入结果"])
 
     def test_team_rejects_unknown_phone(self):
         people = [{"phone": "13800000000"}]

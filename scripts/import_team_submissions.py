@@ -34,6 +34,15 @@ CONFIRMED = "已确认，待处理"
 _submission_run_lock = asyncio.Lock()
 _submission_confirmation_lock = asyncio.Lock()
 FORM_FIELDS = {
+    "captain": ("队长", "队长手机号", "队长邮箱"),
+    "teammate_count": "队友人数",
+    "teammate_blob": "队友信息（可选）",
+    "teammates": [
+        (f"队友{i}", f"队友{i}手机号", f"队友{i}邮箱")
+        for i in range(1, 5)
+    ],
+}
+LEGACY_FORM_FIELDS = {
     "captain": ("队长姓名", "队长手机号（自动校验）", "队长邮箱"),
     "teammate_count": "队伍人数",
     "teammate_blob": "队友信息（可选）",
@@ -42,6 +51,11 @@ FORM_FIELDS = {
         for i in range(1, 5)
     ],
 }
+
+
+def _form_fields_for(fields: dict) -> dict:
+    """Use current field names while preserving already-submitted legacy records."""
+    return FORM_FIELDS if FORM_FIELDS["captain"][0] in fields else LEGACY_FORM_FIELDS
 
 
 def _text(value) -> str:
@@ -84,9 +98,9 @@ def _read_teammates(value) -> list[dict]:
     return people
 
 
-def _read_structured_teammates(fields: dict) -> list[dict]:
+def _read_structured_teammates(fields: dict, form_fields: dict = FORM_FIELDS) -> list[dict]:
     people = []
-    for index, names in enumerate(FORM_FIELDS["teammates"], 1):
+    for index, names in enumerate(form_fields["teammates"], 1):
         person = _read_person(fields, names, f"队友{index}")
         if person:
             people.append(person)
@@ -165,15 +179,16 @@ def _teams_sharing_members(member_ids: set[str], teams: list) -> list:
 
 def _parse_submission(record: dict) -> list[dict]:
     fields = record.get("fields") or {}
-    captain = _read_person(fields, FORM_FIELDS["captain"], "队长")
+    form_fields = _form_fields_for(fields)
+    captain = _read_person(fields, form_fields["captain"], "队长")
     if captain is None:
         raise ValueError("队长信息不能为空")
-    structured_teammates = _read_structured_teammates(fields)
-    blob_teammates = _read_teammates(fields.get(FORM_FIELDS["teammate_blob"]))
+    structured_teammates = _read_structured_teammates(fields, form_fields)
+    blob_teammates = _read_teammates(fields.get(form_fields["teammate_blob"]))
     if structured_teammates and blob_teammates:
         raise ValueError("不能同时填写结构化队友字段和队友信息文本框")
     teammates = structured_teammates or blob_teammates
-    count_text = _text(fields.get(FORM_FIELDS["teammate_count"]))
+    count_text = _text(fields.get(form_fields["teammate_count"]))
     if not count_text:
         raise ValueError("队友人数不能为空")
     try:
@@ -216,16 +231,17 @@ def _best_effort_person(fields: dict, names: tuple[str, str, str]) -> dict | Non
 def _best_effort_people(record: dict) -> list[dict]:
     """失败时尽量提取手机号，用于向队长或队友发送失败原因。"""
     fields = record.get("fields") or {}
+    form_fields = _form_fields_for(fields)
     people = []
-    captain = _best_effort_person(fields, FORM_FIELDS["captain"])
+    captain = _best_effort_person(fields, form_fields["captain"])
     if captain:
         people.append(captain)
     try:
-        structured = _read_structured_teammates(fields)
+        structured = _read_structured_teammates(fields, form_fields)
     except ValueError:
         structured = []
     try:
-        blob = _read_teammates(fields.get(FORM_FIELDS["teammate_blob"]))
+        blob = _read_teammates(fields.get(form_fields["teammate_blob"]))
     except ValueError:
         blob = []
     return people + (structured or blob)
@@ -351,6 +367,8 @@ async def _run(apply: bool) -> int:
         try:
             people = _parse_submission(record)
             matched_people = _match_team_members(people, contestants_by_phone)
+            # Ordinary submission errors take precedence over structural conflicts.
+            person_ids = _validate_matched_team_eligibility(matched_people)
             member_ids = [contestant.record_id for _, contestant in matched_people]
             matched_teams = _teams_sharing_members(set(member_ids), teams)
             change_kind, matched_team = classify_team_change(
@@ -364,7 +382,6 @@ async def _run(apply: bool) -> int:
                         "fields": {STATUS: "已跳过", RESULT: "与已有队伍完全一致，无需变更"},
                     }])
                 continue
-            person_ids = _validate_matched_team_eligibility(matched_people)
             if status == CONFIRMED:
                 if change_kind == "multi-team-match":
                     skipped += 1
