@@ -294,10 +294,15 @@ def resolve_open_ids_by_phones(phones: list[str]) -> dict[str, str]:
 
 def list_member_ids(chat_id: str) -> set[str]:
     """拉取群全部成员 open_id（自动翻页）。"""
+    return set(list_members(chat_id).keys())
+
+
+def list_members(chat_id: str) -> dict[str, str]:
+    """拉取群全部成员（自动翻页），返回 {open_id: 群昵称}。"""
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import GetChatMembersRequest
 
-    out: set[str] = set()
+    out: dict[str, str] = {}
     page_token = ""
     while True:
         b = (GetChatMembersRequest.builder()
@@ -309,7 +314,7 @@ def list_member_ids(chat_id: str) -> set[str]:
             raise RuntimeError(f"读取群成员失败: {resp.code} {resp.msg}")
         for m in (resp.data.items or []):
             if m.member_id:
-                out.add(m.member_id)
+                out[m.member_id] = m.name or ""
         if not resp.data.has_more:
             break
         page_token = resp.data.page_token or ""
@@ -425,6 +430,24 @@ def disband_group(chat_id: str) -> None:
         DeleteChatRequest.builder().chat_id(chat_id).build()))
     if not resp.success():
         raise RuntimeError(f"解散群失败: {resp.code} {resp.msg}")
+
+
+def add_group_managers(chat_id: str, open_ids: list[str]) -> None:
+    """把 open_id 列表设为群管理员（机器人须是群主或已有管理权限）。"""
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import (AddManagersChatManagersRequest,
+                                     AddManagersChatManagersRequestBody)
+
+    req = (AddManagersChatManagersRequest.builder()
+           .chat_id(chat_id)
+           .member_id_type("open_id")
+           .request_body(AddManagersChatManagersRequestBody.builder()
+                         .manager_ids(open_ids)
+                         .build())
+           .build())
+    resp = _im_call_sync(lambda: client().im.v1.chat_managers.add_managers(req))
+    if not resp.success():
+        raise RuntimeError(f"设置群管理员失败: chat_id={chat_id} {resp.code} {resp.msg}")
 
 
 def add_members(chat_id: str, open_ids: list[str]) -> tuple[int, str | None]:
